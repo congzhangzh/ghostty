@@ -31,7 +31,10 @@ pub fn initStatic(
             .optimize = deps.config.optimize,
             .strip = deps.config.strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
-            .unwind_tables = if (deps.config.strip) .none else .sync,
+            // Windows unwinding (SEH) is part of the ABI, not debug data:
+            // mingw's own code needs it, so stripping keeps the tables.
+            .unwind_tables = if (deps.config.strip and
+                deps.config.target.result.os.tag != .windows) .none else .sync,
             .link_libc = true,
         }),
 
@@ -102,7 +105,10 @@ pub fn initShared(
             .optimize = deps.config.optimize,
             .strip = deps.config.strip,
             .omit_frame_pointer = deps.config.omitFramePointer(),
-            .unwind_tables = if (deps.config.strip) .none else .sync,
+            // Windows unwinding (SEH) is part of the ABI, not debug data:
+            // mingw's own code needs it, so stripping keeps the tables.
+            .unwind_tables = if (deps.config.strip and
+                deps.config.target.result.os.tag != .windows) .none else .sync,
         }),
 
         // Fails on self-hosted x86_64
