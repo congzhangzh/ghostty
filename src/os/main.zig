@@ -19,6 +19,7 @@ const kernel_info = @import("kernel_info.zig");
 
 // Namespaces
 pub const cgroup = @import("cgroup.zig");
+pub const conpty = @import("conpty.zig");
 pub const default_shell = @import("default_shell.zig");
 pub const edit = @import("edit.zig");
 pub const hostname = @import("hostname.zig");
