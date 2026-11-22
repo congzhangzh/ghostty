@@ -7134,6 +7134,16 @@ pub const Keybinds = struct {
             .{ .toggle_fullscreen = {} },
         );
 
+        // F11 too on Windows, its programs' full-screen key (its terminal,
+        // its browsers).
+        if (comptime builtin.target.os.tag == .windows) {
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .f11 } },
+                .{ .toggle_fullscreen = {} },
+            );
+        }
+
         // Toggle zoom a split
         try self.set.put(
             alloc,
