@@ -86,6 +86,7 @@ typedef enum {
   GHOSTTY_PLATFORM_INVALID,
   GHOSTTY_PLATFORM_MACOS,
   GHOSTTY_PLATFORM_IOS,
+  GHOSTTY_PLATFORM_WINDOWS,
 } ghostty_platform_e;
 
 typedef enum {
@@ -510,10 +511,27 @@ typedef struct {
   void* GHOSTTY_NULLABLE uiview;
 } ghostty_platform_ios_s;
 
+typedef struct {
+  void* GHOSTTY_NULLABLE hwnd;
+} ghostty_platform_windows_s;
+
 typedef union {
   ghostty_platform_macos_s macos;
   ghostty_platform_ios_s ios;
+  ghostty_platform_windows_s windows;
 } ghostty_platform_u;
+
+// A finished frame for a host that presents frames itself (Windows):
+// rows bottom first (OpenGL's order), each `stride` bytes of premultiplied
+// RGBA8 (sRGB).
+// Valid until ghostty_frame_free.
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  uint32_t stride;
+  const uint8_t* GHOSTTY_NULLABLE pixels;
+  void* GHOSTTY_NULLABLE handle;
+} ghostty_frame_s;
 
 typedef enum {
   GHOSTTY_SURFACE_CONTEXT_WINDOW = 0,
@@ -1212,6 +1230,8 @@ GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
+GHOSTTY_API bool ghostty_surface_take_frame(ghostty_surface_t, ghostty_frame_s*);
+GHOSTTY_API void ghostty_frame_free(ghostty_frame_s*);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
