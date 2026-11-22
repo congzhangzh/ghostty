@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const windows = @import("os/main.zig").windows;
+const conpty = @import("os/main.zig").conpty;
 const posix = std.posix;
 const assert = @import("quirks.zig").inlineAssert;
 
@@ -338,6 +339,10 @@ const WindowsPty = struct {
     pseudo_console: windows.HPCON,
     size: winsize,
 
+    /// The ConPTY that created `pseudo_console` (side-loaded or in-box):
+    /// resize and close go to the same one.
+    conpty: *const conpty.Impl = &conpty.inbox,
+
     /// Set by closeConsole: the pseudo console and our copy of its output
     /// end are already closed.
     console_closed: bool = false,
@@ -445,13 +450,25 @@ const WindowsPty = struct {
         try SetHandleInformation.f(pty.out_pipe);
         try SetHandleInformation.f(pty.out_pipe_pty);
 
-        const result = windows.exp.kernel32.CreatePseudoConsole(
-            .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
+        const console_size: windows.COORD = .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) };
+        pty.conpty = conpty.get();
+        var result = pty.conpty.create(
+            console_size,
             pty.in_pipe_pty,
             pty.out_pipe_pty,
-            0,
+            pty.conpty.flags,
             &pty.pseudo_console,
         );
+        if (result != windows.S_OK and pty.conpty.side_loaded) {
+            pty.conpty = conpty.fallBack(result);
+            result = pty.conpty.create(
+                console_size,
+                pty.in_pipe_pty,
+                pty.out_pipe_pty,
+                pty.conpty.flags,
+                &pty.pseudo_console,
+            );
+        }
         if (result != windows.S_OK) return error.Unexpected;
 
         pty.size = size;
@@ -477,7 +494,7 @@ const WindowsPty = struct {
     pub fn closeConsole(self: *Pty) void {
         if (self.console_closed) return;
         self.console_closed = true;
-        _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+        self.conpty.close(self.pseudo_console);
         _ = windows.exp.kernel32.CloseHandle(self.out_pipe_pty);
     }
 
@@ -492,7 +509,7 @@ const WindowsPty = struct {
 
     /// Set the size of the pty.
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
-        const result = windows.exp.kernel32.ResizePseudoConsole(
+        const result = self.conpty.resize(
             self.pseudo_console,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
         );
