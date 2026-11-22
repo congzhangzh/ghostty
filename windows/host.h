@@ -250,6 +250,7 @@ void notify_toast(Window* w, const char* title, const char* body);
 void notify_progress(Window* w, ghostty_action_progress_report_s r);
 void notify_frame_changed(Frame* f);
 void notify_tab_closed(Window* w);
+bool notify_frame_msg(HWND hwnd, UINT msg);
 Frame* new_frame(void);
 void show_frame(Frame* f);
 bool new_window(ghostty_surface_t from);
