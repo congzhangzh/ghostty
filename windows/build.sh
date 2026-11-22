@@ -25,9 +25,41 @@ console) sub=() ;;
 esac
 
 mkdir -p "$out"
+
+# Build info: what `ghostty.exe /buildinfo` prints, also kept as $out/BUILDINFO.txt. A release
+# build passes its own lines first in $BUILDINFO_FILE (the release kit does: release, version,
+# commits); this adds the source commit, the build and the core components, each with the
+# version its build.zig.zon pins (a commit, a release, or the content hash when the URL has
+# no version).
+src=$(cd "$here/.." && pwd)
+{
+	[ -n "${BUILDINFO_FILE:-}" ] && cat "$BUILDINFO_FILE"
+	rev=$(git -C "$src" rev-parse HEAD 2> /dev/null || echo unknown)
+	git -C "$src" diff --quiet HEAD 2> /dev/null || rev="$rev (modified)"
+	echo "source: $rev $(git -C "$src" rev-parse --abbrev-ref HEAD 2> /dev/null)"
+	echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ), $arch-windows-gnu, host $mode, zig $(zig version)"
+	# The core libraries libghostty links on Windows (not the Linux/macOS-only ones, fonts or
+	# themes). `|| true`: some build.zig.zon files have no URL, and under pipefail a failing
+	# grep would end the loop there.
+	echo "components:"
+	for z in "$src/build.zig.zon" "$src"/pkg/*/build.zig.zon; do
+		grep -oE '\.url = "[^"]+"' "$z" | sed -E 's/^\.url = "//; s/"$//' || true
+	done | sed -E 's|.*/||; s/\.(tar\.gz|tar\.xz|tgz|zip)$//' | sort -u |
+		sed -E 's/^DearBindings_v[^_]*_ImGui_v([^-]+)-docking$/imgui-\1/' |
+		grep -E '^(libxev|z2d|freetype|harfbuzz|zlib|libpng|oniguruma|glslang|spirv_cross|wuffs|highway|imgui)-' |
+		sed -E 's/^(.*)-([^-]+)$/\1 \2/; s/ (1220[0-9a-f]{8})[0-9a-f]*$/ content \1/; s/ ([0-9a-f]{12})[0-9a-f]{28}$/ commit \1/' |
+		awk '{ printf "  %-12s %s %s\n", $1, $2, $3 }'
+} > "$out/BUILDINFO.txt"
+# The same as a C string for the host.
+{
+	echo '#define GHOSTTY_BUILDINFO \'
+	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/  "/' -e 's/$/\\n" \\/' "$out/BUILDINFO.txt"
+	echo '  ""'
+} > "$out/buildinfo.h"
+
 zig cc -target "$arch-windows-gnu" "${opt[@]}" -std=c11 -Wall -Wextra \
 	-Wno-unused-parameter -Wno-missing-field-initializers \
-	-DGHOSTTY_STATIC -I"$prefix/include" \
+	-DGHOSTTY_STATIC -I"$prefix/include" -DGHOSTTY_HAVE_BUILDINFO_H -I"$out" \
 	-c "$here/ghostty.c" -o "$out/ghostty.obj"
 # The static library has C++ in it (glslang, spirv-cross, dear imgui), so
 # the link is a C++ link: zig c++ brings libc++.
@@ -38,4 +70,4 @@ zig c++ -target "$arch-windows-gnu" "${opt[@]}" \
 	"${sub[@]}" \
 	-o "$out/ghostty.exe"
 rm -f "$out/ghostty.obj"
-echo "built $out/ghostty.exe"
+echo "built $out/ghostty.exe (build info: $out/BUILDINFO.txt)"
