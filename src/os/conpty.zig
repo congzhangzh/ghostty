@@ -166,4 +166,8 @@ extern "kernel32" fn GetModuleFileNameW(module: ?HMODULE, name: [*]u16, size: DW
 extern "kernel32" fn GetFileAttributesW(name: [*:0]const u16) callconv(.winapi) DWORD;
 extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?HANDLE, flags: DWORD) callconv(.winapi) ?HMODULE;
 extern "kernel32" fn FreeLibrary(module: HMODULE) callconv(.winapi) windows.BOOL;
-extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+/// What GetProcAddress returns, as Windows declares it (FARPROC): a function pointer, so a
+/// @ptrCast to the real function type keeps its alignment. From ?*anyopaque (alignment 1) the
+/// cast would raise it to a function's, 4 on aarch64, which Zig rejects there.
+const FARPROC = *const fn () callconv(.winapi) isize;
+extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?FARPROC;
