@@ -8,9 +8,9 @@
 // GHOSTTY_ACTION_RENDER it takes the newest frame and blits it.
 //
 // A window (Frame) holds tabs; each tab (Tab) is a child window with one
-// surface, and only the selected tab is shown. As on macOS, the tab bar
-// appears once a window has two tabs (window-show-tab-bar). Built by
-// windows/build.sh.
+// surface, and only the selected tab is shown. The tab bar shows from the
+// first tab, so its + is there to find (window-show-tab-bar, whose default
+// is always on Windows). Built by windows/build.sh.
 
 #ifndef UNICODE
 #define UNICODE
