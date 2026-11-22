@@ -31,6 +31,38 @@ comptime {
 /// Global options so we can log. This is identical to main.
 pub const std_options = main.std_options;
 
+/// On Windows a Zig panic ends in std.process.abort, which exits the process
+/// with RtlExitUserProcess: no exception and no SIGABRT, so the host's crash
+/// handler never sees it and the process just vanishes with exit code 3.
+/// There the panic prints its message and raises a Windows exception that
+/// carries it (code `windows_panic_code`, parameters: the message's address
+/// and length), which the host's unhandled-exception filter reports. Other
+/// targets keep the default (what std picks for the LLVM backend).
+pub const panic = if (builtin.target.os.tag == .windows)
+    std.debug.FullPanic(windowsPanic)
+else
+    std.debug.FullPanic(std.debug.defaultPanic);
+
+/// 0xE0000000 marks a software exception; 0x474850 is "GHP" (Ghostty panic).
+/// The Windows host (windows/ghostty.c) knows this code.
+pub const windows_panic_code: u32 = 0xE0474850;
+
+extern "kernel32" fn RaiseException(
+    code: u32,
+    flags: u32,
+    count: u32,
+    args: ?[*]const usize,
+) callconv(.winapi) void;
+
+fn windowsPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    _ = first_trace_addr;
+    std.debug.print("panic: {s}\n", .{msg});
+    const args = [2]usize{ @intFromPtr(msg.ptr), msg.len };
+    // EXCEPTION_NONCONTINUABLE: a handler cannot resume a panic.
+    RaiseException(windows_panic_code, 1, args.len, &args);
+    std.process.abort();
+}
+
 comptime {
     // These structs need to be referenced so the `export` functions
     // are truly exported by the C API lib.
