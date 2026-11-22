@@ -291,6 +291,12 @@ pub fn build(b: *std.Build) !void {
             if (config.target.result.os.tag == .windows) {
                 lib_shared.install("ghostty-internal.dll");
                 lib_static.install("ghostty-internal-static.lib");
+
+                // The Windows host (windows/) links this library and ships
+                // Ghostty's resources beside ghostty.exe (share/terminfo is
+                // what resourcesDir() looks for), so install them too, as
+                // the xcframework build does for the macOS app.
+                resources.?.install();
             } else {
                 lib_shared.install("ghostty-internal.so");
                 lib_static.install("ghostty-internal.a");
