@@ -2018,6 +2018,10 @@ pub const CAPI = struct {
         stride: u32 = 0,
         pixels: ?[*]const u8 = null,
         handle: ?*anyopaque = null,
+        /// The render thread's cost for this frame: waiting for the GPU
+        /// to finish it, then reading it back into CPU memory.
+        gpu_wait_ns: u64 = 0,
+        readback_ns: u64 = 0,
     };
 
     const FrameMemory = if (renderer.Renderer.ExportedFrame == void)
@@ -2052,6 +2056,8 @@ pub const CAPI = struct {
             .stride = memory.width * 4,
             .pixels = memory.pixels.ptr,
             .handle = box,
+            .gpu_wait_ns = memory.gpu_wait_ns,
+            .readback_ns = memory.readback_ns,
         };
         return true;
     }

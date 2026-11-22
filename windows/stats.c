@@ -46,13 +46,18 @@ static void frame_tick(Frame* f, double dt_ms) {
     w->fps = dt_ms > 0 ? w->tick_frames * 1000.0 / dt_ms : 0;
     w->swizzle_avg_ms = w->tick_frames ? w->tick_swizzle_ms / w->tick_frames : 0;
     w->blit_avg_ms = w->tick_frames ? w->tick_blit_ms / w->tick_frames : 0;
+    w->gpu_wait_avg_ms = w->tick_frames ? w->tick_gpu_wait_ms / w->tick_frames : 0;
+    w->readback_avg_ms = w->tick_frames ? w->tick_readback_ms / w->tick_frames : 0;
     w->tick_frames = 0;
     w->tick_swizzle_ms = w->tick_blit_ms = 0;
+    w->tick_gpu_wait_ms = w->tick_readback_ms = 0;
   }
   Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
   f->fps = w ? w->fps : 0;
   f->swizzle_ms = w ? w->swizzle_avg_ms : 0;
   f->blit_ms = w ? w->blit_avg_ms : 0;
+  f->gpu_wait_ms = w ? w->gpu_wait_avg_ms : 0;
+  f->readback_ms = w ? w->readback_avg_ms : 0;
   f->cpu_pct = g_cpu_pct;
   f->ws_mb = g_ws_mb;
   f->private_mb = g_private_mb;
@@ -126,10 +131,12 @@ static void publish_line(void) {
       put_string(&b, title ? title : "");
       free(title);
       put(&b,
-          ",\"fps\":%.1f,\"key_ms\":%.1f,\"swizzle_ms\":%.3f,"
+          ",\"fps\":%.1f,\"key_ms\":%.1f,\"gpu_wait_ms\":%.3f,"
+          "\"readback_ms\":%.3f,\"swizzle_ms\":%.3f,"
           "\"blit_ms\":%.3f,\"frame\":[%u,%u],\"grid\":[%u,%u],"
           "\"cell\":[%u,%u]}",
-          w->fps, w->latency_ms, w->swizzle_avg_ms, w->blit_avg_ms, w->frame_w,
+          w->fps, w->latency_ms, w->gpu_wait_avg_ms, w->readback_avg_ms,
+          w->swizzle_avg_ms, w->blit_avg_ms, w->frame_w,
           w->frame_h, sz.columns, sz.rows, sz.cell_width_px, sz.cell_height_px);
     }
     put(&b, "]}");
@@ -214,6 +221,8 @@ WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box) {
            "Ghostty stats (Ctrl+Shift+I)\n"
            "frames   %5.1f /s   %ux%u px\n"
            "key      %5.1f ms   key to its first frame on screen\n"
+           "gpu      %5.2f ms   render thread waits for the GPU, per frame\n"
+           "readback %5.2f ms   glReadPixels into CPU memory, per frame\n"
            "swizzle  %5.2f ms   RGBA to BGRA, per frame\n"
            "blit     %5.2f ms   GDI SetDIBits, per frame\n"
            "cpu      %5.1f %%    of one core (the whole process)\n"
@@ -222,7 +231,8 @@ WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box) {
            "opengl   4.3 core, WGL, frames through the CPU\n"
            "driver   %s\n"
            "%s",
-           f->fps, w->frame_w, w->frame_h, w->latency_ms, f->swizzle_ms,
+           f->fps, w->frame_w, w->frame_h, w->latency_ms, f->gpu_wait_ms,
+           f->readback_ms, f->swizzle_ms,
            f->blit_ms, f->cpu_pct, f->ws_mb, f->private_mb, sz.columns,
            sz.rows, sz.cell_width_px, sz.cell_height_px, f->ntabs,
            f->ntabs == 1 ? "" : "s", gl_driver(), build);
