@@ -249,6 +249,7 @@ static void track_bar_mouse(Frame* f, int x, int y) {
 
 // A window: the tab bar, and the tabs as child windows below it.
 LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (notify_frame_msg(hwnd, msg)) return 0;  // TaskbarButtonCreated (notify.c)
   Frame* f = (Frame*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
   if (!f) return DefWindowProcW(hwnd, msg, wp, lp);
 

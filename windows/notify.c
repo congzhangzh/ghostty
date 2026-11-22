@@ -10,7 +10,10 @@
 //
 // Progress goes to the window's taskbar button (ITaskbarList3): the selected tab's progress if
 // it reports one, else the most severe of the window's tabs (error, paused, normal,
-// indeterminate). A state is kept per tab, so bursts collapse to the last one.
+// indeterminate). A state is kept per tab, so bursts collapse to the last one. When the
+// taskbar (re)creates a window's button it sends "TaskbarButtonCreated" (also after Explorer
+// restarts), and the window's progress is sent again; for an elevated ghostty.exe that message
+// is let through UIPI. Every progress action and every COM result is logged.
 
 #include "host.h"
 
@@ -175,12 +178,25 @@ static int g_nshown, g_capshown;
 static ITaskbarList3* g_taskbar;
 static bool g_taskbar_failed;
 
+static bool elevated(void) {
+  HANDLE token;
+  TOKEN_ELEVATION e = {0};
+  DWORD n = 0;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  BOOL ok = GetTokenInformation(token, TokenElevation, &e, sizeof e, &n);
+  CloseHandle(token);
+  return ok && e.TokenIsElevated;
+}
+
 static ITaskbarList3* taskbar(void) {
   if (g_taskbar || g_taskbar_failed) return g_taskbar;
-  HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);  // the UI thread; S_FALSE or RPC_E_CHANGED_MODE are fine
-  (void)hr;
-  hr = CoCreateInstance(&kClsidTaskbarList, NULL, CLSCTX_INPROC_SERVER, &kIidTaskbarList3, (void**)&g_taskbar);
+  // The UI thread; S_FALSE (already) or RPC_E_CHANGED_MODE (an MTA) are fine.
+  HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  HRESULT create = CoCreateInstance(&kClsidTaskbarList, NULL, CLSCTX_INPROC_SERVER, &kIidTaskbarList3, (void**)&g_taskbar);
+  HRESULT hr = create;
   if (SUCCEEDED(hr)) hr = g_taskbar->lpVtbl->HrInit(g_taskbar);
+  fprintf(stderr, "ghostty: notify: ITaskbarList3: CoInitializeEx 0x%08lx, CoCreateInstance 0x%08lx, HrInit 0x%08lx; process elevated: %s\n",
+          (unsigned long)init, (unsigned long)create, (unsigned long)hr, elevated() ? "yes" : "no");
   if (FAILED(hr)) {
     fprintf(stderr, "ghostty: notify: no taskbar progress (ITaskbarList3: HRESULT 0x%08lx)\n", (unsigned long)hr);
     if (g_taskbar) g_taskbar->lpVtbl->Release(g_taskbar);
@@ -244,9 +260,9 @@ static void apply(Frame* f) {
   if (SUCCEEDED(hr) && value >= 0) hr = tb->lpVtbl->SetProgressValue(tb, f->hwnd, (ULONGLONG)value, 100);
   char num[8] = "";
   if (value >= 0) snprintf(num, sizeof num, " %d", value);
-  fprintf(stderr, "ghostty: notify: taskbar progress %s%s (HRESULT 0x%08lx)\n",
+  fprintf(stderr, "ghostty: notify: taskbar progress %s%s (HRESULT 0x%08lx) on window %p%s\n",
           flag == TBPF_NORMAL ? "normal" : flag == TBPF_ERROR ? "error" : flag == TBPF_PAUSED ? "paused" : flag == TBPF_INDETERMINATE ? "indeterminate" : "none",
-          num, (unsigned long)hr);
+          num, (unsigned long)hr, (void*)f->hwnd, IsWindowVisible(f->hwnd) ? "" : " (not visible)");
 
   if (flag == TBPF_NOPROGRESS) {
     if (s) *s = g_shown[--g_nshown];
@@ -268,6 +284,8 @@ static void apply(Frame* f) {
 }
 
 void notify_progress(Window* w, ghostty_action_progress_report_s r) {
+  fprintf(stderr, "ghostty: notify: progress action: state %d, value %d%s\n", (int)r.state, (int)r.progress,
+          w ? "" : " (no tab: ignored)");
   if (!w) return;
   TabProgress* p = progress_of(w);
   if (r.state == GHOSTTY_PROGRESS_STATE_REMOVE) {
@@ -307,4 +325,26 @@ void notify_tab_closed(Window* w) {
     return;
   }
   apply(f);
+}
+
+// The frame window's messages, first thing in frame_proc (its Frame isn't set yet at
+// WM_NCCREATE). True when it was "TaskbarButtonCreated", which this handles.
+bool notify_frame_msg(HWND hwnd, UINT msg) {
+  static UINT button_created;
+  if (!button_created) button_created = RegisterWindowMessageW(L"TaskbarButtonCreated");
+  if (msg == WM_NCCREATE) {
+    // Before the button exists: an elevated process would not get the message otherwise.
+    ChangeWindowMessageFilterEx(hwnd, button_created, MSGFLT_ALLOW, NULL);
+    return false;
+  }
+  if (!button_created || msg != button_created) return false;
+  Frame* f = (Frame*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+  fprintf(stderr, "ghostty: notify: taskbar button created for window %p\n", (void*)hwnd);
+  for (int i = 0; i < g_nshown; i++)  // a new button shows nothing: send it all again
+    if (g_shown[i].hwnd == hwnd) {
+      g_shown[i] = g_shown[--g_nshown];
+      break;
+    }
+  if (f) apply(f);
+  return true;
 }
