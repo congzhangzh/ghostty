@@ -59,6 +59,10 @@ context: Context,
 /// back and the host presents them (the default).
 swap_window: SwapWindow = if (Device.api == .wgl) null else {},
 
+/// The size of the last frame swapped into `swap_window`: a new size
+/// rebinds the context to the window first.
+swap_size: if (Device.api == .wgl) [2]usize else void = if (Device.api == .wgl) .{ 0, 0 } else {},
+
 const SwapWindow = if (Device.api == .wgl) ?gl.wgl.Window else void;
 
 /// GHOSTTY_PRESENT=swap asks for the swap present path (Windows).
@@ -390,6 +394,14 @@ pub fn present(
     if (comptime Device.api == .wgl) if (self.swap_window) |window| {
         const io = global.io();
         const t0: std.Io.Timestamp = .now(io, .awake);
+        // A new size: make the context current on the window again. On
+        // Windows that is cheap; under Wine a resized GL child window gets
+        // a new drawable, and a context left on the old one swaps into
+        // nothing (suspected: the window stopped updating in 1 of 3 runs).
+        if (self.swap_size[0] != target.width or self.swap_size[1] != target.height) {
+            self.context.rebind(window) catch |err| log.warn("present: rebind err={}", .{err});
+            self.swap_size = .{ target.width, target.height };
+        }
         const read = try target.framebuffer.bind(.read);
         defer read.unbind();
         const draw = try gl.Framebuffer.bind(.{ .id = 0 }, .draw);
