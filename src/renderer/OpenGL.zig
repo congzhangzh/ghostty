@@ -2,6 +2,7 @@
 pub const OpenGL = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const gl = @import("opengl");
 const egl = gl.egl;
@@ -47,13 +48,39 @@ blending: configpkg.Config.AlphaBlending,
 /// The shared render device.
 device: *const Device,
 
-egl_context: *gl.egl.Context,
+/// This surface's OpenGL context: an EGL context, or on Windows a WGL
+/// context with the hidden window that provides its DC.
+context: Context,
+
+const Context = switch (Device.api) {
+    .egl => *gl.egl.Context,
+    .wgl => gl.wgl.Context,
+};
 
 pub fn init(
     alloc: Allocator,
     device: *const Device,
     opts: rendererpkg.Options,
 ) !OpenGL {
+    if (comptime Device.api == .wgl) {
+        // Created on the main thread, made current on the render
+        // thread in `threadEnter`; nothing is current after this.
+        const context = gl.wgl.Context.create(
+            MIN_VERSION_MAJOR,
+            MIN_VERSION_MINOR,
+            builtin.mode == .debug,
+        ) catch |err| {
+            log.warn("failed to create WGL context err={}", .{err});
+            return err;
+        };
+        return .{
+            .alloc = alloc,
+            .blending = opts.config.blending,
+            .device = device,
+            .context = context,
+        };
+    }
+
     const display = device.display;
 
     // Bind to OpenGL API explicitly before we create the context,
@@ -85,13 +112,21 @@ pub fn init(
         .alloc = alloc,
         .blending = opts.config.blending,
         .device = device,
-        .egl_context = context,
+        .context = context,
     };
 }
 
 pub fn deinit(self: *OpenGL) void {
-    self.device.display.releaseCurrent();
-    self.egl_context.destroy(self.device.display) catch {};
+    switch (comptime Device.api) {
+        .egl => {
+            self.device.display.releaseCurrent();
+            self.context.destroy(self.device.display) catch {};
+        },
+        .wgl => {
+            gl.wgl.releaseCurrent();
+            self.context.destroy();
+        },
+    }
     self.* = undefined;
 }
 
@@ -200,16 +235,27 @@ fn prepareContext(getProcAddress: anytype) !void {
 /// function pointers so all subsequent GL work on this thread is valid.
 pub fn threadEnter(self: *OpenGL, surface: *apprt.Surface) !void {
     _ = surface;
-    try self.device.display.makeCurrent(null, null, self.egl_context);
-    // Load our function pointers for this thread's threadlocal.
-    try prepareContext(&gl.egl.getProcAddress);
+    switch (comptime Device.api) {
+        .egl => {
+            try self.device.display.makeCurrent(null, null, self.context);
+            // Load our function pointers for this thread's threadlocal.
+            try prepareContext(&gl.egl.getProcAddress);
+        },
+        .wgl => {
+            try self.context.makeCurrent();
+            try prepareContext(&gl.wgl.getProcAddress);
+        },
+    }
 }
 
 /// Callback called by renderer.Thread when it exits. Called on the render
 /// thread; unbinds the context from this thread so it can be destroyed on
 /// the main thread.
 pub fn threadExit(self: *OpenGL) void {
-    self.device.display.releaseCurrent();
+    switch (comptime Device.api) {
+        .egl => self.device.display.releaseCurrent(),
+        .wgl => gl.wgl.releaseCurrent(),
+    }
     gl.glad.unload();
 }
 
@@ -280,9 +326,9 @@ pub fn present(
     presentation_health: rendererpkg.Health,
 ) !ExportedFrame {
     // We only export DMABUFs when the apprt can present them.
-    // Otherwise, use CPU buffers.
-    if (presentation_health == .healthy) {
-        if (target.exportDmabuf(self.device.display, self.egl_context)) |dmabuf| {
+    // Otherwise, use CPU buffers. Windows has no DMABUFs at all.
+    if ((comptime Device.api == .egl) and presentation_health == .healthy) {
+        if (target.exportDmabuf(self.device.display, self.context)) |dmabuf| {
             return .{ .dmabuf = dmabuf };
         } else |_| {
             log.warn("failed to export DMABUF, falling back to CPU presentation", .{});

@@ -13,6 +13,8 @@
 pub const c = @import("opengl_c");
 pub const glad = @import("glad.zig");
 pub const egl = @import("egl.zig");
+/// WGL, the Windows OpenGL context API. Only usable when targeting Windows.
+pub const wgl = @import("wgl.zig");
 pub const ext = @import("extensions.zig");
 pub const Buffer = @import("Buffer.zig");
 pub const Framebuffer = @import("Framebuffer.zig");
