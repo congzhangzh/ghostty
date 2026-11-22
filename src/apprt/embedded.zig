@@ -382,6 +382,7 @@ pub const App = struct {
 pub const Platform = union(PlatformTag) {
     macos: MacOS,
     ios: IOS,
+    windows: Windows,
 
     // If our build target for libghostty is not darwin then we do
     // not include macos support at all.
@@ -395,6 +396,13 @@ pub const Platform = union(PlatformTag) {
         uiview: objc.Object,
     } else void;
 
+    pub const Windows = if (builtin.target.os.tag == .windows) struct {
+        /// The window (HWND) the host shows the surface in. The OpenGL
+        /// renderer draws offscreen and the host presents the frames
+        /// (ghostty_surface_take_frame), so this is informational for now.
+        hwnd: *anyopaque,
+    } else void;
+
     // The C ABI compatible version of this union. The tag is expected
     // to be stored elsewhere.
     pub const C = extern union {
@@ -404,6 +412,10 @@ pub const Platform = union(PlatformTag) {
 
         ios: extern struct {
             uiview: ?*anyopaque,
+        },
+
+        windows: extern struct {
+            hwnd: ?*anyopaque,
         },
     };
 
@@ -424,6 +436,10 @@ pub const Platform = union(PlatformTag) {
                     break :ios error.UIViewMustBeSet);
                 break :ios .{ .ios = .{ .uiview = uiview } };
             } else error.UnsupportedPlatform,
+
+            .windows => if (Windows != void) .{ .windows = .{
+                .hwnd = c_platform.windows.hwnd orelse return error.HWNDMustBeSet,
+            } } else error.UnsupportedPlatform,
         };
     }
 };
@@ -434,6 +450,7 @@ pub const PlatformTag = enum(c_int) {
 
     macos = 1,
     ios = 2,
+    windows = 3,
 };
 
 pub const EnvVar = extern struct {
@@ -1989,6 +2006,64 @@ pub const CAPI = struct {
     /// call as soon as possible (NOW if possible).
     export fn ghostty_surface_draw(surface: *Surface) void {
         surface.draw();
+    }
+
+    /// A finished frame for a host that presents frames itself (the
+    /// Windows host: the OpenGL renderer draws offscreen). Rows are
+    /// bottom first, as glReadPixels returns them, each `stride` bytes
+    /// of premultiplied RGBA8 in sRGB. Valid until `ghostty_frame_free`.
+    pub const Frame = extern struct {
+        width: u32 = 0,
+        height: u32 = 0,
+        stride: u32 = 0,
+        pixels: ?[*]const u8 = null,
+        handle: ?*anyopaque = null,
+    };
+
+    const FrameMemory = if (renderer.Renderer.ExportedFrame == void)
+        void
+    else
+        renderer.Renderer.ExportedFrame.Memory;
+
+    /// Take the newest finished frame, if there is one since the last
+    /// call. The host calls it when it gets GHOSTTY_ACTION_RENDER and
+    /// presents the frame; the call also tells the renderer that the
+    /// host can take frames. Returns false when no frame is waiting, or
+    /// when this renderer does not export frames (Metal).
+    export fn ghostty_surface_take_frame(surface: *Surface, out: *Frame) bool {
+        out.* = .{};
+        if (comptime FrameMemory == void) return false;
+        const frame = surface.core_surface.renderer.takeFrame() orelse return false;
+        const memory = switch (frame) {
+            .memory => |m| m,
+            else => {
+                frame.deinit();
+                return false;
+            },
+        };
+        const box = memory.alloc.create(FrameMemory) catch {
+            memory.deinit();
+            return false;
+        };
+        box.* = memory;
+        out.* = .{
+            .width = memory.width,
+            .height = memory.height,
+            .stride = memory.width * 4,
+            .pixels = memory.pixels.ptr,
+            .handle = box,
+        };
+        return true;
+    }
+
+    /// Free a frame from `ghostty_surface_take_frame`.
+    export fn ghostty_frame_free(frame: *Frame) void {
+        if (comptime FrameMemory == void) return;
+        const box: *FrameMemory = @ptrCast(@alignCast(frame.handle orelse return));
+        const alloc = box.alloc;
+        box.deinit();
+        alloc.destroy(box);
+        frame.* = .{};
     }
 
     /// Update the size of a surface. This will trigger resize notifications
