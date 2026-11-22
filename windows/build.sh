@@ -67,6 +67,14 @@ src=$(cd "$here/.." && pwd)
 		tag=${tag/ (modified)/+mod}
 	fi
 	echo "#define GHOSTTY_BUILD_TAG \"${tag:-dev}\""
+	# About and What's new: the release kit passes this build's notes (WHATSNEW_FILE, UTF-8 text;
+	# empty for a test build) and pys's family line (FAMILY_LINE); empty when not given.
+	echo '#define GHOSTTY_WHATSNEW \'
+	if [ -n "${WHATSNEW_FILE:-}" ] && [ -s "$WHATSNEW_FILE" ]; then
+		sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/  "/' -e 's/$/\\n" \\/' "$WHATSNEW_FILE"
+	fi
+	echo '  ""'
+	printf '#define GHOSTTY_FAMILY "%s"\n' "$(printf '%s' "${FAMILY_LINE:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 } > "$out/buildinfo.h"
 
 # The host's modules (windows/*.c, sharing windows/host.h), one object each.
