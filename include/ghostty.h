@@ -523,7 +523,8 @@ typedef union {
 
 // A finished frame for a host that presents frames itself (Windows):
 // rows bottom first (OpenGL's order), each `stride` bytes of premultiplied
-// RGBA8 (sRGB).
+// RGBA8 (sRGB). `pixels` is NULL when the renderer drew into the surface's
+// window itself (GHOSTTY_PRESENT=swap): only the size and the costs.
 // Valid until ghostty_frame_free.
 typedef struct {
   uint32_t width;

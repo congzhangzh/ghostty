@@ -154,7 +154,9 @@ int main(int argc, char** argv) {
   RegisterClassExW(&fc);
 
   WNDCLASSEXW wc = {sizeof(wc)};
-  wc.style = CS_HREDRAW | CS_VREDRAW;
+  // CS_OWNDC: GHOSTTY_PRESENT=swap gives the window's DC to OpenGL for the
+  // window's life.
+  wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
   wc.lpfnWndProc = terminal_proc;
   wc.hInstance = g_inst;
   wc.hCursor = LoadCursorW(NULL, IDC_IBEAM);

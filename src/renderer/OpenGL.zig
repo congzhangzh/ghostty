@@ -53,6 +53,20 @@ device: *const Device,
 /// context with the hidden window that provides its DC.
 context: Context,
 
+/// Windows, GHOSTTY_PRESENT=swap: the surface's own window, which the
+/// context draws into and swaps, so a frame never comes back through the
+/// CPU (no glReadPixels, no copies in the host). Null: frames are read
+/// back and the host presents them (the default).
+swap_window: SwapWindow = if (Device.api == .wgl) null else {},
+
+const SwapWindow = if (Device.api == .wgl) ?gl.wgl.Window else void;
+
+/// GHOSTTY_PRESENT=swap asks for the swap present path (Windows).
+fn swapWanted() bool {
+    const v = std.c.getenv("GHOSTTY_PRESENT") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "swap");
+}
+
 const Context = switch (Device.api) {
     .egl => *gl.egl.Context,
     .wgl => gl.wgl.Context,
@@ -254,7 +268,6 @@ fn prepareContext(getProcAddress: anytype) !void {
 /// here we (re)bind it to this thread and load the thread-local glad
 /// function pointers so all subsequent GL work on this thread is valid.
 pub fn threadEnter(self: *OpenGL, surface: *apprt.Surface) !void {
-    _ = surface;
     switch (comptime Device.api) {
         .egl => {
             try self.device.display.makeCurrent(null, null, self.context);
@@ -262,7 +275,23 @@ pub fn threadEnter(self: *OpenGL, surface: *apprt.Surface) !void {
             try prepareContext(&gl.egl.getProcAddress);
         },
         .wgl => {
-            try self.context.makeCurrent();
+            const hwnd: ?gl.wgl.HWND = if (comptime @hasField(@TypeOf(surface.*), "platform"))
+                @ptrCast(surface.platform.windows.hwnd)
+            else
+                null;
+            if (swapWanted() and hwnd != null) {
+                // Draw into the surface's own window; if it cannot be,
+                // the frames are read back as before.
+                if (self.context.attachWindow(hwnd.?)) |window| {
+                    self.swap_window = window;
+                    log.info("present: SwapBuffers on the surface's window", .{});
+                } else |err| {
+                    log.warn("present: no swap on the window err={}, reading frames back", .{err});
+                    try self.context.makeCurrent();
+                }
+            } else {
+                try self.context.makeCurrent();
+            }
             try prepareContext(&gl.wgl.getProcAddress);
         },
     }
@@ -354,6 +383,33 @@ pub fn present(
             log.warn("failed to export DMABUF, falling back to CPU presentation", .{});
         }
     }
+
+    // The swap path: the frame goes to the window's back buffer (the
+    // target's bytes are sRGB-encoded already, so the blit copies them as
+    // they are) and is swapped; the host gets only its size and the cost.
+    if (comptime Device.api == .wgl) if (self.swap_window) |window| {
+        const io = global.io();
+        const t0: std.Io.Timestamp = .now(io, .awake);
+        const read = try target.framebuffer.bind(.read);
+        defer read.unbind();
+        const draw = try gl.Framebuffer.bind(.{ .id = 0 }, .draw);
+        defer draw.unbind();
+        const srgb = gl.glad.context.IsEnabled.?(gl.c.GL_FRAMEBUFFER_SRGB) != 0;
+        if (srgb) gl.glad.context.Disable.?(gl.c.GL_FRAMEBUFFER_SRGB);
+        const w: gl.c.GLint = @intCast(target.width);
+        const h: gl.c.GLint = @intCast(target.height);
+        try gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, .{ .color_buffer_bit = true }, .nearest);
+        if (srgb) gl.glad.context.Enable.?(gl.c.GL_FRAMEBUFFER_SRGB);
+        if (!window.swap()) log.warn("SwapBuffers failed", .{});
+        const t1: std.Io.Timestamp = .now(io, .awake);
+        return .{ .memory = .{
+            .width = @intCast(target.width),
+            .height = @intCast(target.height),
+            .pixels = try self.alloc.alloc(u8, 0),
+            .alloc = self.alloc,
+            .readback_ns = @intCast(@max(0, t0.durationTo(t1).nanoseconds)),
+        } };
+    };
 
     // What the readback costs, for the host's stats (Windows): first the
     // wait for the GPU to finish the frame (glReadPixels would wait the
