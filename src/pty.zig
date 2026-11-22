@@ -338,6 +338,10 @@ const WindowsPty = struct {
     pseudo_console: windows.HPCON,
     size: winsize,
 
+    /// Set by closeConsole: the pseudo console and our copy of its output
+    /// end are already closed.
+    console_closed: bool = false,
+
     pub const OpenError = error{Unexpected};
 
     /// Open a new PTY with the given initial size.
@@ -451,16 +455,30 @@ const WindowsPty = struct {
         if (result != windows.S_OK) return error.Unexpected;
 
         pty.size = size;
+        pty.console_closed = false;
         return pty;
     }
 
     pub fn deinit(self: *Pty) void {
+        self.closeConsole();
         _ = windows.exp.kernel32.CloseHandle(self.in_pipe_pty);
         _ = windows.exp.kernel32.CloseHandle(self.in_pipe);
-        _ = windows.exp.kernel32.CloseHandle(self.out_pipe_pty);
         _ = windows.exp.kernel32.CloseHandle(self.out_pipe);
-        _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
         self.* = undefined;
+    }
+
+    /// Close the pseudo console and our copy of the write end of its
+    /// output pipe. With no writer left, a ReadFile on `out_pipe` ends
+    /// with ERROR_BROKEN_PIPE once the remaining output is read, so a
+    /// thread blocked reading it returns by itself; cancelling its
+    /// synchronous read (CancelIoEx) is not needed. Call it while that
+    /// thread still reads: ClosePseudoConsole can wait until the console
+    /// has written its last output. Safe to call more than once.
+    pub fn closeConsole(self: *Pty) void {
+        if (self.console_closed) return;
+        self.console_closed = true;
+        _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+        _ = windows.exp.kernel32.CloseHandle(self.out_pipe_pty);
     }
 
     pub const GetSizeError = error{};

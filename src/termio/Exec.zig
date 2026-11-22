@@ -123,8 +123,8 @@ pub fn threadEnter(
     // Create our pipe that we'll use to kill our read thread.
     // pipe[0] is the read end, pipe[1] is the write end.
     const pipe = try internal_os.pipe();
-    errdefer _ = posix.system.close(pipe[0]);
-    errdefer _ = posix.system.close(pipe[1]);
+    errdefer closePipe(pipe[0]);
+    errdefer closePipe(pipe[1]);
 
     // Setup our stream so that we can write.
     var stream = xev.Stream.initFd(pty_fds.write);
@@ -203,7 +203,12 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    switch (posix.errno(posix.system.write(exec.read_thread_pipe, "x", 1))) {
+    if (comptime builtin.target.os.tag == .windows) {
+        var n: windows.DWORD = 0;
+        if (windows.exp.kernel32.WriteFile(exec.read_thread_pipe, "x", 1, &n, null) == windows.FALSE) {
+            log.warn("error writing to read thread quit pipe err={}", .{windows.GetLastError()});
+        }
+    } else switch (posix.errno(posix.system.write(exec.read_thread_pipe, "x", 1))) {
         .SUCCESS => {},
 
         // EPIPE means that our read thread is closed already, which is
@@ -217,6 +222,12 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     }
 
     if (comptime builtin.target.os.tag == .windows) {
+        // End the blocking read: with the pseudo console closed, the
+        // read sees the end of the pipe and the thread then takes the
+        // quit byte. This does not depend on cancelling synchronous I/O
+        // in another thread, which not every system does (Wine doesn't).
+        if (self.subprocess.pty) |*pty| pty.closeConsole();
+
         // Interrupt the blocking read so the thread can see the quit message
         if (windows.exp.kernel32.CancelIoEx(exec.read_thread_fd, null) == windows.FALSE) {
             switch (windows.GetLastError()) {
@@ -547,7 +558,7 @@ pub const ThreadData = struct {
     termios_mode: ptypkg.Mode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        _ = posix.system.close(self.read_thread_pipe);
+        closePipe(self.read_thread_pipe);
 
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
@@ -1777,7 +1788,7 @@ pub const ReadThread = struct {
 
     fn threadMainWindows(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
-        defer _ = posix.system.close(quit);
+        defer closePipe(quit);
 
         // Setup our crash metadata
         crash.sentry.thread_state = .{
@@ -1788,43 +1799,66 @@ pub const ReadThread = struct {
 
         var buf: [1024]u8 = undefined;
         while (true) {
-            while (true) {
-                var n: windows.DWORD = 0;
-                if (windows.exp.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == windows.FALSE) {
-                    const err = windows.GetLastError();
-                    switch (err) {
-                        // Check for a quit signal
-                        .OPERATION_ABORTED => break,
+            var n: windows.DWORD = 0;
+            if (windows.exp.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == windows.FALSE) {
+                switch (windows.GetLastError()) {
+                    // CancelIoEx from threadExit: quit if it asked us to,
+                    // otherwise the cancel was not for us; read on.
+                    .OPERATION_ABORTED => if (quitRequested(quit)) return else continue,
 
-                        else => {
-                            log.err("io reader error err={}", .{err});
-                            unreachable;
-                        },
-                    }
+                    // The pseudo console closed its end: nothing more
+                    // will come. Wait for threadExit to tell us to quit.
+                    .BROKEN_PIPE, .HANDLE_EOF, .PIPE_NOT_CONNECTED => break,
+
+                    else => |err| {
+                        log.err("io reader error err={}", .{err});
+                        break;
+                    },
                 }
-
-                @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
-
-                // See threadMainPosix: hand the renderer state mutex
-                // off if the renderer is waiting, since this loop
-                // would otherwise starve it under heavy output.
-                io.renderer_state.yieldToDemand(global.io());
             }
 
-            var quit_bytes: windows.DWORD = 0;
-            if (windows.exp.kernel32.PeekNamedPipe(quit, null, 0, null, &quit_bytes, null) == windows.FALSE) {
-                const err = windows.GetLastError();
-                log.err("quit pipe reader error err={}", .{err});
-                unreachable;
-            }
+            // A successful read of zero bytes is the end of the pipe, like
+            // BROKEN_PIPE above. Looping on it would spin forever without
+            // ever seeing the quit signal.
+            if (n == 0) break;
 
-            if (quit_bytes > 0) {
-                log.info("read thread got quit signal", .{});
-                return;
-            }
+            @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
+
+            // See threadMainPosix: hand the renderer state mutex
+            // off if the renderer is waiting, since this loop
+            // would otherwise starve it under heavy output.
+            io.renderer_state.yieldToDemand(global.io());
         }
+
+        // The pty is done. Block until threadExit writes the quit byte
+        // (or closes its end), so the thread ends when it is joined.
+        var byte: [1]u8 = undefined;
+        var n: windows.DWORD = 0;
+        _ = windows.exp.kernel32.ReadFile(quit, &byte, 1, &n, null);
+        log.info("read thread got quit signal", .{});
+    }
+
+    /// Whether threadExit has written the quit byte.
+    fn quitRequested(quit: posix.fd_t) bool {
+        var quit_bytes: windows.DWORD = 0;
+        if (windows.exp.kernel32.PeekNamedPipe(quit, null, 0, null, &quit_bytes, null) == windows.FALSE) {
+            // The write end is gone: threadExit is done with us.
+            return true;
+        }
+        return quit_bytes > 0;
     }
 };
+
+/// Close one end of the read thread's quit pipe (os/pipe.zig). On Windows
+/// the ends are CreatePipe HANDLEs, which the C runtime's close (what
+/// posix.system is when libc is linked) cannot take: it expects a CRT fd.
+fn closePipe(fd: posix.fd_t) void {
+    if (comptime builtin.target.os.tag == .windows) {
+        _ = windows.exp.kernel32.CloseHandle(fd);
+    } else {
+        _ = posix.system.close(fd);
+    }
+}
 
 /// Builds the argv array for the process we should exec for the
 /// configured command. This isn't as straightforward as it seems since
