@@ -254,6 +254,13 @@ void paint_frame(Frame* f) {
     DeleteObject(bmp);
     DeleteDC(mem);
   }
+  // Under the bar the panes cover all but the dividers between them
+  // (WS_CLIPCHILDREN): those get the bar's edge color.
+  if (rc.bottom > b) {
+    RECT r = {0, b, rc.right, rc.bottom};
+    SetDCBrushColor(dc, mix(bar_color(), g_fg, 0.12));
+    FillRect(dc, &r, (HBRUSH)GetStockObject(DC_BRUSH));
+  }
   EndPaint(f->hwnd, &ps);
 }
 
@@ -267,10 +274,84 @@ void invalidate_bar(Frame* f) {
 // ---------------------------------------------------------------------------
 // Tabs
 
+// The tab a pane is in (any pane of it: f->tabs[i] is the tab's focused
+// pane, so everything that looks at "the tab" sees the pane in use).
 int tab_index(Frame* f, Window* w) {
   for (int i = 0; i < f->ntabs; i++)
-    if (f->tabs[i] == w) return i;
+    if (f->tabs[i] == w || (w && w->tab && f->tabs[i]->tab == w->tab)) return i;
   return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Splits
+
+static void collect(Node* n, Window** out, int cap, int* count) {
+  if (!n) return;
+  if (n->pane) {
+    if (*count < cap) out[*count] = n->pane;
+    (*count)++;
+    return;
+  }
+  collect(n->a, out, cap, count);
+  collect(n->b, out, cap, count);
+}
+
+// A tab's panes in tree order (left to right, top to bottom); the count.
+int tab_panes(Tab* t, Window** out, int cap) {
+  int count = 0;
+  if (t) collect(t->root, out, cap, &count);
+  return count;
+}
+
+#define MAX_PANES 64
+
+// Lay a node out in r: a pane gets the rectangle, a split divides it with
+// a one-pixel divider (the frame paints it).
+static void layout_node(Node* n, RECT r) {
+  if (!n) return;
+  if (n->pane) {
+    SetWindowPos(n->pane->hwnd, NULL, r.left, r.top, r.right - r.left,
+                 r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    return;
+  }
+  RECT a = r, b = r;
+  if (n->vertical) {
+    int h = r.bottom - r.top - 1;
+    int cut = r.top + (int)(h * n->ratio + 0.5);
+    a.bottom = cut;
+    b.top = cut + 1;
+  } else {
+    int w = r.right - r.left - 1;
+    int cut = r.left + (int)(w * n->ratio + 0.5);
+    a.right = cut;
+    b.left = cut + 1;
+  }
+  layout_node(n->a, a);
+  layout_node(n->b, b);
+}
+
+// Show (or hide) a tab's panes: all of them, or the zoomed one alone. A
+// hidden pane's surface is told it is occluded.
+static void show_tab(Window* any, bool show) {
+  Window* panes[MAX_PANES];
+  int n = tab_panes(any->tab, panes, MAX_PANES);
+  if (n > MAX_PANES) n = MAX_PANES;
+  for (int i = 0; i < n; i++) {
+    bool on = show && (!any->tab->zoomed || panes[i] == any->tab->zoomed);
+    ghostty_surface_set_occlusion(panes[i]->surface, on);
+    ShowWindow(panes[i]->hwnd, on ? SW_SHOW : SW_HIDE);
+  }
+}
+
+// A pane got the keyboard: it is its tab's focused pane now (the tab's
+// title, the window's title, the bar follow it).
+void pane_focused(Window* w) {
+  Frame* f = w->frame;
+  int i = tab_index(f, w);
+  if (i < 0 || f->tabs[i] == w) return;
+  f->tabs[i] = w;
+  if (i == f->active) update_title(f);
+  invalidate_bar(f);
 }
 
 // The window's title (the taskbar's too): the selected tab's title and
@@ -302,10 +383,14 @@ void layout(Frame* f) {
   if (rc.right <= 0 || rc.bottom <= 0) return;  // minimized
   titlebar_update(f);  // the caption buttons, DWM's frame over the bar
   int b = bar_height(f);
-  int h = rc.bottom > b ? rc.bottom - b : 0;
-  for (int i = 0; i < f->ntabs; i++)
-    SetWindowPos(f->tabs[i]->hwnd, NULL, 0, b, rc.right, h,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
+  RECT area = {0, b, rc.right, rc.bottom > b ? rc.bottom : b};
+  for (int i = 0; i < f->ntabs; i++) {
+    Tab* t = f->tabs[i]->tab;
+    if (t && t->zoomed)
+      layout_node(t->zoomed->node, area);  // the zoomed pane: all the room
+    else
+      layout_node(t ? t->root : NULL, area);
+  }
   InvalidateRect(f->hwnd, NULL, FALSE);
 }
 
@@ -317,13 +402,9 @@ void select_tab(Frame* f, int i) {
                                                         : NULL;
   Window* w = f->tabs[i];
   f->active = i;
-  if (old != w) ghostty_surface_set_occlusion(w->surface, true);
-  ShowWindow(w->hwnd, SW_SHOW);
+  show_tab(w, true);
   if (GetActiveWindow() == f->hwnd) SetFocus(w->hwnd);
-  if (old && old != w) {
-    ShowWindow(old->hwnd, SW_HIDE);
-    ghostty_surface_set_occlusion(old->surface, false);
-  }
+  if (old && old->tab != w->tab) show_tab(old, false);
   update_title(f);
   invalidate_bar(f);
   notify_frame_changed(f);
@@ -381,10 +462,11 @@ void size_tab(Window* w) {
                              (uint32_t)rc.bottom);
 }
 
-// A new tab in f, after the selected one (or at the end), inheriting the
-// working directory and font size of `from` when there is one.
-Window* new_tab(Frame* f, ghostty_surface_t from,
-                       ghostty_surface_context_e context) {
+// A new pane in f: its child window and its surface, inheriting the
+// working directory and font size of `from` when there is one. Not yet in
+// a tab.
+static Window* new_pane(Frame* f, ghostty_surface_t from,
+                        ghostty_surface_context_e context) {
   Window* w = calloc(1, sizeof(Window));
   if (!w) return NULL;
   w->frame = f;
@@ -405,21 +487,136 @@ Window* new_tab(Frame* f, ghostty_surface_t from,
   cfg.scale_factor = w->scale;
   cfg.context = context;
   w->surface = ghostty_surface_new(g_app, &cfg);
-  if (!w->surface || !insert_tab(f, w, g_new_tab_at_end || f->active < 0
-                                           ? f->ntabs
-                                           : f->active + 1)) {
+  w->node = calloc(1, sizeof(Node));
+  if (!w->surface || !w->node) {
     fprintf(stderr, "ghostty: could not create the terminal surface\n");
     if (w->surface) ghostty_surface_free(w->surface);
+    free(w->node);
     SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, 0);
     DestroyWindow(w->hwnd);
     free(w);
     return NULL;
   }
+  w->node->pane = w;
   ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
+  return w;
+}
+
+// Undo new_pane for a pane in no tree yet.
+static void free_pane(Window* w) {
+  ghostty_surface_free(w->surface);
+  SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, 0);
+  DestroyWindow(w->hwnd);
+  free(w->node);
+  free(w);
+}
+
+// A new tab in f, after the selected one (or at the end): one pane.
+Window* new_tab(Frame* f, ghostty_surface_t from,
+                       ghostty_surface_context_e context) {
+  Window* w = new_pane(f, from, context);
+  if (!w) return NULL;
+  w->tab = calloc(1, sizeof(Tab));
+  if (!w->tab || !insert_tab(f, w, g_new_tab_at_end || f->active < 0
+                                       ? f->ntabs
+                                       : f->active + 1)) {
+    free(w->tab);
+    free_pane(w);
+    return NULL;
+  }
+  w->tab->root = w->node;
   layout(f);
   size_tab(w);
   select_tab(f, tab_index(f, w));
   return w;
+}
+
+// A new pane beside `w` (right, down, left or up), in w's tab: the two
+// share w's place half and half; the new one takes the keyboard (as the
+// macOS app does). A zoomed tab is unzoomed first.
+bool new_split(Window* w, ghostty_action_split_direction_e dir) {
+  Frame* f = w->frame;
+  int ti = tab_index(f, w);
+  if (ti < 0 || tab_panes(w->tab, NULL, 0) >= MAX_PANES) return false;
+  Window* n = new_pane(f, w->surface, GHOSTTY_SURFACE_CONTEXT_SPLIT);
+  if (!n) return false;
+  Node* split = calloc(1, sizeof(Node));
+  if (!split) {
+    free_pane(n);
+    return false;
+  }
+  bool first = dir == GHOSTTY_SPLIT_DIRECTION_LEFT || dir == GHOSTTY_SPLIT_DIRECTION_UP;
+  Node* old = w->node;
+  split->parent = old->parent;
+  split->vertical = dir == GHOSTTY_SPLIT_DIRECTION_DOWN || dir == GHOSTTY_SPLIT_DIRECTION_UP;
+  split->ratio = 0.5;
+  split->a = first ? n->node : old;
+  split->b = first ? old : n->node;
+  if (!old->parent)
+    w->tab->root = split;
+  else if (old->parent->a == old)
+    old->parent->a = split;
+  else
+    old->parent->b = split;
+  old->parent = n->node->parent = split;
+  n->tab = w->tab;
+  w->tab->zoomed = NULL;
+  f->tabs[ti] = n;  // the tab's focused pane
+  layout(f);
+  size_tab(n);
+  if (ti == f->active) {
+    show_tab(n, true);
+    if (GetActiveWindow() == f->hwnd) SetFocus(n->hwnd);
+    update_title(f);
+  } else {
+    show_tab(n, false);
+  }
+  invalidate_bar(f);
+  return true;
+}
+
+// A pane closed (its surface went): its leaf leaves the tree, its sibling
+// takes the parent's place, and the tab's focus moves there. The tab's
+// last pane takes the tab with it (detach_tab, as before splits).
+void pane_gone(Frame* f, Window* w) {
+  Tab* t = w->tab;
+  Node* leaf = w->node;
+  if (!t || !leaf || !leaf->parent) {
+    detach_tab(f, w);
+    free(leaf);
+    free(t);
+    return;
+  }
+  int ti = tab_index(f, w);
+  Node* parent = leaf->parent;
+  Node* sibling = parent->a == leaf ? parent->b : parent->a;
+  sibling->parent = parent->parent;
+  if (!parent->parent)
+    t->root = sibling;
+  else if (parent->parent->a == parent)
+    parent->parent->a = sibling;
+  else
+    parent->parent->b = sibling;
+  free(parent);
+  free(leaf);
+  w->node = NULL;
+  if (t->zoomed == w) t->zoomed = NULL;
+  if (ti >= 0 && f->tabs[ti] == w) {
+    // The first pane of the side that took its place.
+    Node* n = sibling;
+    while (!n->pane) n = n->a;
+    f->tabs[ti] = n->pane;
+  }
+  if (f->destroying) return;
+  layout(f);
+  if (ti >= 0) {
+    if (ti == f->active) {
+      show_tab(f->tabs[ti], true);
+      if (GetActiveWindow() == f->hwnd) SetFocus(f->tabs[ti]->hwnd);
+      update_title(f);
+    }
+    invalidate_bar(f);
+  }
 }
 
 // Move the selected tab by `amount`, wrapping around the ends.
@@ -439,7 +636,17 @@ void move_tab(Frame* f, int amount) {
 
 // Close a tab as its close button does: Ghostty asks the surface to close
 // and calls close_surface_cb when it does.
-void close_tab(Window* w) { ghostty_surface_request_close(w->surface); }
+// All the tab's panes are asked (collected first: a pane may close at once).
+void close_tab(Window* w) {
+  Window* panes[MAX_PANES];
+  int n = tab_panes(w->tab, panes, MAX_PANES);
+  if (n <= 0) {
+    ghostty_surface_request_close(w->surface);
+    return;
+  }
+  if (n > MAX_PANES) n = MAX_PANES;
+  for (int i = 0; i < n; i++) ghostty_surface_request_close(panes[i]->surface);
+}
 
 // ---------------------------------------------------------------------------
 // Window procedures
@@ -484,6 +691,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       mouse_pos(w, lp);
       return 0;
     case WM_LBUTTONDOWN:
+      if (GetFocus() != hwnd) SetFocus(hwnd);  // a click picks the pane
       mouse_button(w, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT);
       return 0;
     case WM_LBUTTONUP:
@@ -529,6 +737,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_SETFOCUS:
       ghostty_surface_set_focus(w->surface, true);
+      pane_focused(w);
       return 0;
     case WM_KILLFOCUS:
       ghostty_surface_set_focus(w->surface, false);
@@ -549,7 +758,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       w->surface = NULL;
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
       notify_tab_closed(w);
-      detach_tab(f, w);
+      pane_gone(f, w);
       free(w->title);
       free(w->bgra);
       free(w);

@@ -356,9 +356,13 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DPICHANGED: {
       f->scale = HIWORD(wp) / 96.0;
       for (int i = 0; i < f->ntabs; i++) {
-        Window* w = f->tabs[i];
-        w->scale = f->scale;
-        ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
+        Window* panes[64];
+        int n = tab_panes(f->tabs[i]->tab, panes, 64);
+        for (int k = 0; k < n && k < 64; k++) {
+          Window* w = panes[k];
+          w->scale = f->scale;
+          ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
+        }
       }
       const RECT* r = (const RECT*)lp;
       SetWindowPos(hwnd, NULL, r->left, r->top, r->right - r->left,

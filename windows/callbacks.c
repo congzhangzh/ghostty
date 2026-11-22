@@ -131,6 +131,10 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       return true;
     }
 
+    case GHOSTTY_ACTION_NEW_SPLIT:
+      // Beside the pane it came from, in its tab.
+      return w && new_split(w, action.action.new_split);
+
     case GHOSTTY_ACTION_NEW_TAB:
       if (!f) f = front_frame();
       if (!f) return new_window(NULL);
@@ -188,11 +192,23 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       if (!f || f->ntabs < 2) return false;
       Frame* nf = new_frame();
       if (!nf) return false;
-      detach_tab(f, w);
-      SetParent(w->hwnd, nf->hwnd);
+      // The tab with all its panes (f->tabs holds its focused one).
+      Window* tw = f->tabs[tab_index(f, w)];
+      Window* panes[64];
+      int np = tab_panes(tw->tab, panes, 64);
+      if (np > 64) np = 64;
+      detach_tab(f, tw);
+      for (int i = 0; i < np; i++) {
+        SetParent(panes[i]->hwnd, nf->hwnd);
+        panes[i]->frame = nf;
+      }
+      w = tw;
       if (!insert_tab(nf, w, 0)) {
         // Out of memory: put it back where it was.
-        SetParent(w->hwnd, f->hwnd);
+        for (int i = 0; i < np; i++) {
+          SetParent(panes[i]->hwnd, f->hwnd);
+          panes[i]->frame = f;
+        }
         insert_tab(f, w, f->ntabs);
         layout(f);
         DestroyWindow(nf->hwnd);

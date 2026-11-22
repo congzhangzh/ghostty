@@ -45,8 +45,18 @@ static double g_cpu_pct, g_ws_mb, g_private_mb, g_period_ms;
 
 // One window's period: each tab's, and the selected tab's for the overlay.
 static void frame_tick(Frame* f, double dt_ms) {
-  for (int i = 0; i < f->ntabs; i++) {
-    Window* w = f->tabs[i];
+  // Every pane's counters (a split tab has several), each tab's focused
+  // pane being the one the overlay and the pipe show.
+  Window* all[256];
+  int na = 0;
+  for (int i = 0; i < f->ntabs && na < 256; i++) {
+    Window* panes[64];
+    int n = tab_panes(f->tabs[i]->tab, panes, 64);
+    if (n <= 0) all[na++] = f->tabs[i];
+    for (int k = 0; k < n && k < 64 && na < 256; k++) all[na++] = panes[k];
+  }
+  for (int i = 0; i < na; i++) {
+    Window* w = all[i];
     w->fps = dt_ms > 0 ? w->tick_frames * 1000.0 / dt_ms : 0;
     w->swizzle_avg_ms = w->tick_frames ? w->tick_swizzle_ms / w->tick_frames : 0;
     w->blit_avg_ms = w->tick_frames ? w->tick_blit_ms / w->tick_frames : 0;

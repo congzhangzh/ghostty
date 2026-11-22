@@ -76,6 +76,24 @@
 
 typedef struct Frame Frame;
 
+// Splits: a tab is a tree of panes. A Node is a pane (a leaf) or a split of
+// two nodes, side by side (left|right) or `vertical` (above|below), the
+// first taking `ratio` of the room. Every pane of a tab points to the Tab.
+typedef struct Window Window;
+typedef struct Node Node;
+struct Node {
+  Node* parent;
+  Node* a;
+  Node* b;
+  Window* pane;  // a leaf: this pane; a split: NULL
+  bool vertical;
+  double ratio;
+};
+typedef struct Tab {
+  Node* root;
+  Window* zoomed;  // a pane that takes the whole tab, or NULL
+} Tab;
+
 // What a point of the tab bar is (tabs.c).
 typedef enum {
   HIT_NONE,
@@ -85,8 +103,10 @@ typedef enum {
 } BarHit;
 
 // A tab: a child window of its Frame, with one surface drawing into it.
-typedef struct Window {
+struct Window {
   Frame* frame;
+  Tab* tab;    // the tab this pane is in (shared by its panes)
+  Node* node;  // its leaf in the tab's tree
   HWND hwnd;
   ghostty_surface_t surface;
   double scale;  // DPI / 96
@@ -117,7 +137,7 @@ typedef struct Window {
   double latency_ms;       // that key to the end of its frame's paint
   // Over the last stats period: frames per second, host ms per frame.
   double fps, swizzle_avg_ms, blit_avg_ms, gpu_wait_avg_ms, readback_avg_ms;
-} Window;
+};
 
 // A top-level window: its tabs, the selected one, and the tab bar.
 struct Frame {
@@ -219,6 +239,10 @@ Window* new_tab(Frame* f, ghostty_surface_t from,
                        ghostty_surface_context_e context);
 void move_tab(Frame* f, int amount);
 void close_tab(Window* w);
+bool new_split(Window* w, ghostty_action_split_direction_e dir);
+void pane_gone(Frame* f, Window* w);
+void pane_focused(Window* w);
+int tab_panes(Tab* t, Window** out, int cap);
 extern bool g_titlebar_tabs;
 void titlebar_choose(void);
 bool titlebar_active(Frame* f);
