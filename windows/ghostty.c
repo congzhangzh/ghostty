@@ -367,13 +367,21 @@ static void take_frame(Window* w) {
   ghostty_frame_free(&f);
 }
 
-static void draw_stats(Window* w, HDC dc, RECT rc);
+static WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box);
+static void present_stats(Window* w, HDC dc, RECT box, const WCHAR* text);
 
 static void paint(Window* w) {
   PAINTSTRUCT ps;
   HDC dc = BeginPaint(w->hwnd, &ps);
   RECT rc;
   GetClientRect(w->hwnd, &rc);
+  // The stats overlay's box is left out of the frame's blit and drawn once
+  // on its own: every pixel on screen is written once per paint, so the box
+  // never shows the frame under it for a moment (a flash).
+  RECT box;
+  WCHAR* stats = w->frame->stats ? stats_layout(w, dc, rc, &box) : NULL;
+  int saved = SaveDC(dc);
+  if (stats) ExcludeClipRect(dc, box.left, box.top, box.right, box.bottom);
   if (w->bgra && w->frame_w && w->frame_h) {
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
@@ -400,7 +408,11 @@ static void paint(Window* w) {
   } else {
     FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
   }
-  if (w->frame->stats) draw_stats(w, dc, rc);
+  RestoreDC(dc, saved);
+  if (stats) {
+    present_stats(w, dc, box, stats);
+    free(stats);
+  }
   EndPaint(w->hwnd, &ps);
   // The key that this frame was the first answer to is now on screen.
   if (w->frame_key_qpc) {
@@ -1614,7 +1626,9 @@ static void set_stats(Frame* f, bool on) {
   if (f->active >= 0) InvalidateRect(f->tabs[f->active]->hwnd, NULL, FALSE);
 }
 
-static void draw_stats(Window* w, HDC dc, RECT rc) {
+// The overlay's text (malloc'd) and where its box goes in rc (the top right
+// corner); dc only measures.
+static WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box) {
   Frame* f = w->frame;
   UINT dpi = (UINT)(w->scale * 96 + 0.5);
   if (!f->stats_font || f->stats_font_dpi != dpi) {
@@ -1651,23 +1665,47 @@ static void draw_stats(Window* w, HDC dc, RECT rc) {
            sz.rows, sz.cell_width_px, sz.cell_height_px, f->ntabs,
            f->ntabs == 1 ? "" : "s", gl_driver(), build);
   WCHAR* wt = utf8_to_utf16(text, -1);
-  if (!wt) return;
+  if (!wt) return NULL;
   HGDIOBJ old = SelectObject(dc, f->stats_font);
   RECT t = {0, 0, 0, 0};
   DrawTextW(dc, wt, -1, &t, DT_CALCRECT | DT_NOPREFIX);
-  int pad = (int)(8 * w->scale + 0.5);
-  RECT box = {rc.right - (t.right + 2 * pad) - pad, pad, rc.right - pad,
-              pad + t.bottom + 2 * pad};
-  SetDCBrushColor(dc, RGB(16, 16, 20));
-  FillRect(dc, &box, (HBRUSH)GetStockObject(DC_BRUSH));
-  SetDCBrushColor(dc, RGB(90, 90, 100));
-  FrameRect(dc, &box, (HBRUSH)GetStockObject(DC_BRUSH));
-  RECT tr = {box.left + pad, box.top + pad, box.right - pad, box.bottom - pad};
-  SetBkMode(dc, TRANSPARENT);
-  SetTextColor(dc, RGB(220, 220, 225));
-  DrawTextW(dc, wt, -1, &tr, DT_NOPREFIX);
   SelectObject(dc, old);
-  free(wt);
+  int pad = (int)(8 * w->scale + 0.5);
+  box->left = rc.right - (t.right + 2 * pad) - pad;
+  box->top = pad;
+  box->right = rc.right - pad;
+  box->bottom = pad + t.bottom + 2 * pad;
+  return wt;
+}
+
+// The box drawn off screen, then copied to dc in one go.
+static void present_stats(Window* w, HDC dc, RECT box, const WCHAR* text) {
+  int bw = box.right - box.left, bh = box.bottom - box.top;
+  if (bw <= 0 || bh <= 0) return;
+  HDC mem = CreateCompatibleDC(dc);
+  HBITMAP bmp = CreateCompatibleBitmap(dc, bw, bh);
+  if (!mem || !bmp) {
+    if (bmp) DeleteObject(bmp);
+    if (mem) DeleteDC(mem);
+    return;
+  }
+  HGDIOBJ oldbmp = SelectObject(mem, bmp);
+  RECT r = {0, 0, bw, bh};
+  SetDCBrushColor(mem, RGB(16, 16, 20));
+  FillRect(mem, &r, (HBRUSH)GetStockObject(DC_BRUSH));
+  SetDCBrushColor(mem, RGB(90, 90, 100));
+  FrameRect(mem, &r, (HBRUSH)GetStockObject(DC_BRUSH));
+  int pad = (int)(8 * w->scale + 0.5);
+  RECT tr = {pad, pad, bw - pad, bh - pad};
+  HGDIOBJ oldfont = SelectObject(mem, w->frame->stats_font);
+  SetBkMode(mem, TRANSPARENT);
+  SetTextColor(mem, RGB(220, 220, 225));
+  DrawTextW(mem, text, -1, &tr, DT_NOPREFIX);
+  SelectObject(mem, oldfont);
+  BitBlt(dc, box.left, box.top, bw, bh, mem, 0, 0, SRCCOPY);
+  SelectObject(mem, oldbmp);
+  DeleteObject(bmp);
+  DeleteDC(mem);
 }
 
 // ---------------------------------------------------------------------------
