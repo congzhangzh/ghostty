@@ -250,32 +250,82 @@ WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box) {
   return wt;
 }
 
-// The box drawn off screen, then copied to dc in one go.
+// The panel's opacity: GHOSTTY_STATS_ALPHA in percent, 60 by default (the
+// owner: "can it be light, so I can see underlay?").
+static BYTE stats_alpha(void) {
+  static int pct = -1;
+  if (pct < 0) {
+    const char* v = getenv("GHOSTTY_STATS_ALPHA");
+    pct = v ? atoi(v) : 60;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+  }
+  return (BYTE)(pct * 255 / 100);
+}
+
+// The box drawn off screen, then copied to dc in one go (each pixel once a
+// paint: no flash). Translucent: the frame's own pixels under the box,
+// a dark panel blended over them, then the text opaque with a thin dark
+// outline, readable over a light theme too.
 void present_stats(Window* w, HDC dc, RECT box, const WCHAR* text) {
   int bw = box.right - box.left, bh = box.bottom - box.top;
   if (bw <= 0 || bh <= 0) return;
   HDC mem = CreateCompatibleDC(dc);
   HBITMAP bmp = CreateCompatibleBitmap(dc, bw, bh);
-  if (!mem || !bmp) {
+  HDC panel_dc = CreateCompatibleDC(dc);
+  HBITMAP panel = CreateCompatibleBitmap(dc, 1, 1);
+  if (!mem || !bmp || !panel_dc || !panel) {
+    if (panel) DeleteObject(panel);
+    if (panel_dc) DeleteDC(panel_dc);
     if (bmp) DeleteObject(bmp);
     if (mem) DeleteDC(mem);
     return;
   }
   HGDIOBJ oldbmp = SelectObject(mem, bmp);
   RECT r = {0, 0, bw, bh};
-  SetDCBrushColor(mem, RGB(16, 16, 20));
-  FillRect(mem, &r, (HBRUSH)GetStockObject(DC_BRUSH));
+
+  // What the frame has under the box (black where it has nothing yet).
+  FillRect(mem, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
+  if (w->bgra && w->frame_w && w->frame_h) {
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = (LONG)w->frame_w;
+    bmi.bmiHeader.biHeight = (LONG)w->frame_h;  // bottom-up, as paint()
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    SetDIBitsToDevice(mem, -box.left, -box.top, w->frame_w, w->frame_h, 0, 0,
+                      0, w->frame_h, w->bgra, &bmi, DIB_RGB_COLORS);
+  }
+
+  // The panel over it.
+  HGDIOBJ oldpanel = SelectObject(panel_dc, panel);
+  SetPixel(panel_dc, 0, 0, RGB(16, 16, 20));
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, stats_alpha(), 0};
+  AlphaBlend(mem, 0, 0, bw, bh, panel_dc, 0, 0, 1, 1, blend);
+  SelectObject(panel_dc, oldpanel);
   SetDCBrushColor(mem, RGB(90, 90, 100));
   FrameRect(mem, &r, (HBRUSH)GetStockObject(DC_BRUSH));
+
+  // The text, opaque: a one-pixel dark outline, then the text.
   int pad = (int)(8 * w->scale + 0.5);
-  RECT tr = {pad, pad, bw - pad, bh - pad};
   HGDIOBJ oldfont = SelectObject(mem, w->frame->stats_font);
   SetBkMode(mem, TRANSPARENT);
-  SetTextColor(mem, RGB(220, 220, 225));
+  SetTextColor(mem, RGB(0, 0, 0));
+  static const int dx[4] = {-1, 1, 0, 0}, dy[4] = {0, 0, -1, 1};
+  for (int k = 0; k < 4; k++) {
+    RECT tr = {pad + dx[k], pad + dy[k], bw - pad + dx[k], bh - pad + dy[k]};
+    DrawTextW(mem, text, -1, &tr, DT_NOPREFIX);
+  }
+  SetTextColor(mem, RGB(230, 230, 235));
+  RECT tr = {pad, pad, bw - pad, bh - pad};
   DrawTextW(mem, text, -1, &tr, DT_NOPREFIX);
   SelectObject(mem, oldfont);
+
   BitBlt(dc, box.left, box.top, bw, bh, mem, 0, 0, SRCCOPY);
   SelectObject(mem, oldbmp);
+  DeleteObject(panel);
+  DeleteDC(panel_dc);
   DeleteObject(bmp);
   DeleteDC(mem);
 }
