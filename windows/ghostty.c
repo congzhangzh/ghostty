@@ -7,7 +7,10 @@
 // owns the window: it turns Win32 messages into Ghostty input, and on
 // GHOSTTY_ACTION_RENDER it takes the newest frame and blits it.
 //
-// One window, one surface for now. Built by windows/build.sh.
+// A window (Frame) holds tabs; each tab (Tab) is a child window with one
+// surface, and only the selected tab is shown. As on macOS, the tab bar
+// appears once a window has two tabs (window-show-tab-bar). Built by
+// windows/build.sh.
 
 #ifndef UNICODE
 #define UNICODE
@@ -42,7 +45,11 @@
 #define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)
 #endif
 
+typedef struct Frame Frame;
+
+// A tab: a child window of its Frame, with one surface drawing into it.
 typedef struct Window {
+  Frame* frame;
   HWND hwnd;
   ghostty_surface_t surface;
   double scale;  // DPI / 96
@@ -55,18 +62,47 @@ typedef struct Window {
   // A high surrogate from WM_CHAR waiting for its low half.
   WCHAR high_surrogate;
 
+  // The title the terminal set (malloc'd), or NULL.
+  WCHAR* title;
+} Window;
+
+// A top-level window: its tabs, the selected one, and the tab bar.
+struct Frame {
+  HWND hwnd;
+  Frame* next;  // every open Frame, newest first (g_frames)
+  Window** tabs;
+  int ntabs, cap;
+  int active;  // the selected tab, or -1
+  double scale;
+
   // Full screen: the placement to go back to when it ends.
   bool fullscreen;
   WINDOWPLACEMENT placement;
-} Window;
+
+  bool destroying;  // DestroyWindow is taking its tabs down with it
+
+  // The tab bar under the mouse: a tab (and whether its close button),
+  // the new-tab button, or nothing.
+  int hover;
+  bool hover_close, hover_plus, tracking;
+  HFONT font;
+  UINT font_dpi;
+};
+
+typedef enum { TAB_BAR_AUTO, TAB_BAR_ALWAYS, TAB_BAR_NEVER } TabBarMode;
 
 static ghostty_app_t g_app;
 static ghostty_config_t g_config;
+static HINSTANCE g_inst;
 static HWND g_wakeup_hwnd;  // message-only window for wakeups
 static volatile LONG g_wakeup_posted;  // a WM_GHOSTTY_WAKEUP is queued
-static int g_windows;       // open terminal windows
+static Frame* g_frames;     // open windows
 static bool g_debug_keys;   // GHOSTTY_DEBUG_KEYS is set: trace key messages
-static const WCHAR* const kTerminalClass = L"GhosttyWindow";
+static TabBarMode g_tab_bar;     // window-show-tab-bar
+static bool g_new_tab_at_end;    // window-new-tab-position = end
+static COLORREF g_bg, g_fg;      // the terminal's colors, for the tab bar
+static const WCHAR* const kFrameClass = L"GhosttyWindow";
+static const WCHAR* const kTerminalClass = L"GhosttyTerminal";
 static const WCHAR* const kWakeupClass = L"GhosttyWakeup";
 
 // ---------------------------------------------------------------------------
@@ -228,9 +264,10 @@ static void mouse_pos(Window* w, LPARAM lp) {
 
 static void mouse_button(Window* w, ghostty_input_mouse_state_e state,
                          ghostty_input_mouse_button_e button) {
-  if (state == GHOSTTY_MOUSE_PRESS)
+  if (state == GHOSTTY_MOUSE_PRESS) {
     SetCapture(w->hwnd);
-  else
+    if (GetFocus() != w->hwnd) SetFocus(w->hwnd);
+  } else
     ReleaseCapture();
   ghostty_surface_mouse_button(w->surface, state, button, current_mods());
 }
@@ -364,7 +401,7 @@ static void confirm_read_clipboard_cb(void* ud,
   const WCHAR* what = req == GHOSTTY_CLIPBOARD_REQUEST_PASTE
                           ? L"The text you are pasting may run commands. Paste it?"
                           : L"A program in the terminal wants to read the clipboard. Allow it?";
-  int r = MessageBoxW(w->hwnd, what, L"Ghostty", MB_YESNO | MB_ICONWARNING);
+  int r = MessageBoxW(w->frame->hwnd, what, L"Ghostty", MB_YESNO | MB_ICONWARNING);
   if (r == IDYES) {
     ghostty_clipboard_complete_s done = {c->contents, c->contents_len,
                                          c->available, c->available_len,
@@ -384,7 +421,7 @@ static void write_clipboard_cb(void* ud, ghostty_clipboard_e which,
     if (!contents[i].mime || strncmp(contents[i].mime, "text/plain", 10) != 0)
       continue;
     if (confirm &&
-        MessageBoxW(w->hwnd,
+        MessageBoxW(w->frame->hwnd,
                     L"A program in the terminal wants to set the clipboard. Allow it?",
                     L"Ghostty", MB_YESNO | MB_ICONWARNING) != IDYES)
       return;
@@ -400,7 +437,7 @@ static void write_clipboard_cb(void* ud, ghostty_clipboard_e which,
 // window is on (not just its work area), on top. Windows hides the taskbar
 // for a foreground window that covers its monitor. Leaving restores the
 // placement saved on entry, maximized or not.
-static void set_fullscreen(Window* w, bool on) {
+static void set_fullscreen(Frame* w, bool on) {
   if (on == w->fullscreen) return;
   LONG style = GetWindowLongW(w->hwnd, GWL_STYLE);
   if (on) {
@@ -435,6 +472,428 @@ static bool config_fullscreen(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Config the host reads
+
+// A config value that is a string (enums come back as their name), or NULL.
+static const char* config_string(const char* key) {
+  const char* v = NULL;
+  if (!ghostty_config_get(g_config, &v, key, strlen(key))) return NULL;
+  return v;
+}
+
+static COLORREF config_color(const char* key, COLORREF fallback) {
+  ghostty_config_color_s c;
+  if (!ghostty_config_get(g_config, &c, key, strlen(key))) return fallback;
+  return RGB(c.r, c.g, c.b);
+}
+
+static void read_host_config(void) {
+  const char* v = config_string("window-show-tab-bar");
+  g_tab_bar = !v                         ? TAB_BAR_AUTO
+              : strcmp(v, "always") == 0 ? TAB_BAR_ALWAYS
+              : strcmp(v, "never") == 0  ? TAB_BAR_NEVER
+                                         : TAB_BAR_AUTO;
+  v = config_string("window-new-tab-position");
+  g_new_tab_at_end = v && strcmp(v, "end") == 0;
+  g_bg = config_color("background", RGB(0x28, 0x2c, 0x34));
+  g_fg = config_color("foreground", RGB(0xff, 0xff, 0xff));
+}
+
+// ---------------------------------------------------------------------------
+// The tab bar
+//
+// Drawn by the Frame in its client area above the tabs, in the terminal's
+// own colors as macOS does: the selected tab has the terminal's background
+// and the others are darker; tabs share the width equally, the title is
+// centered, a tab under the mouse shows its close button on the left, and
+// the + at the right end opens a new tab.
+
+static int px(Frame* f, double points) { return (int)(points * f->scale + 0.5); }
+
+static int bar_height(Frame* f) {
+  bool show = g_tab_bar == TAB_BAR_ALWAYS ||
+              (g_tab_bar == TAB_BAR_AUTO && f->ntabs > 1);
+  return show ? px(f, 30) : 0;
+}
+
+static COLORREF mix(COLORREF a, COLORREF b, double t) {
+  return RGB((int)(GetRValue(a) * (1 - t) + GetRValue(b) * t + 0.5),
+             (int)(GetGValue(a) * (1 - t) + GetGValue(b) * t + 0.5),
+             (int)(GetBValue(a) * (1 - t) + GetBValue(b) * t + 0.5));
+}
+
+static bool is_dark(COLORREF c) {
+  return 0.299 * GetRValue(c) + 0.587 * GetGValue(c) + 0.114 * GetBValue(c) <
+         128;
+}
+
+static void tab_rect(Frame* f, int width, int b, int i, RECT* r) {
+  int area = width - b;  // the + button is b wide
+  if (area < 0) area = 0;
+  r->left = (int)((long long)area * i / f->ntabs);
+  r->right = (int)((long long)area * (i + 1) / f->ntabs);
+  r->top = 0;
+  r->bottom = b;
+}
+
+static void close_rect(Frame* f, const RECT* tab, RECT* r) {
+  int s = px(f, 16), pad = px(f, 7);
+  r->left = tab->left + pad;
+  r->right = r->left + s;
+  r->top = (tab->bottom - s) / 2;
+  r->bottom = r->top + s;
+}
+
+typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } BarHit;
+
+static BarHit bar_hit(Frame* f, int x, int y, int* index) {
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  int b = bar_height(f);
+  *index = -1;
+  if (b == 0 || y < 0 || y >= b || x < 0 || x >= rc.right) return HIT_NONE;
+  if (x >= rc.right - b) return HIT_PLUS;
+  for (int i = 0; i < f->ntabs; i++) {
+    RECT t, c;
+    tab_rect(f, rc.right, b, i, &t);
+    if (x < t.left || x >= t.right) continue;
+    *index = i;
+    close_rect(f, &t, &c);
+    POINT p = {x, y};
+    return PtInRect(&c, p) ? HIT_CLOSE : HIT_TAB;
+  }
+  return HIT_NONE;
+}
+
+static HFONT bar_font(Frame* f) {
+  UINT dpi = (UINT)(f->scale * 96 + 0.5);
+  if (f->font && f->font_dpi == dpi) return f->font;
+  if (f->font) DeleteObject(f->font);
+  NONCLIENTMETRICSW m = {sizeof(m)};
+  LOGFONTW lf;
+  if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(m), &m, 0,
+                                 dpi)) {
+    lf = m.lfMessageFont;
+  } else {
+    memset(&lf, 0, sizeof(lf));
+    lf.lfHeight = -MulDiv(9, (int)dpi, 72);
+    wcscpy(lf.lfFaceName, L"Segoe UI");
+  }
+  f->font = CreateFontIndirectW(&lf);
+  f->font_dpi = dpi;
+  return f->font;
+}
+
+static void fill(HDC dc, int l, int t, int r, int b, COLORREF c) {
+  RECT x = {l, t, r, b};
+  SetDCBrushColor(dc, c);
+  FillRect(dc, &x, (HBRUSH)GetStockObject(DC_BRUSH));
+}
+
+static void stroke(HDC dc, int x0, int y0, int x1, int y1, int width,
+                   COLORREF c) {
+  HPEN pen = CreatePen(PS_SOLID, width, c);
+  HGDIOBJ old = SelectObject(dc, pen);
+  MoveToEx(dc, x0, y0, NULL);
+  LineTo(dc, x1, y1);
+  SelectObject(dc, old);
+  DeleteObject(pen);
+}
+
+static void draw_bar(Frame* f, HDC dc, int width, int b) {
+  bool dark = is_dark(g_bg);
+  COLORREF bar = mix(g_bg, RGB(0, 0, 0), dark ? 0.35 : 0.10);
+  COLORREF hover = mix(bar, g_bg, 0.5);
+  COLORREF line = mix(bar, g_fg, 0.12);
+  COLORREF dim = mix(g_fg, bar, 0.45);
+  int lw = px(f, 1.25) > 0 ? px(f, 1.25) : 1;
+
+  fill(dc, 0, 0, width, b, bar);
+  SelectObject(dc, bar_font(f));
+  SetBkMode(dc, TRANSPARENT);
+
+  for (int i = 0; i < f->ntabs; i++) {
+    Window* t = f->tabs[i];
+    RECT r, c;
+    tab_rect(f, width, b, i, &r);
+    bool sel = i == f->active, over = i == f->hover;
+    if (sel || over) fill(dc, r.left, r.top, r.right, r.bottom, sel ? g_bg : hover);
+    // A divider between two tabs that are not selected.
+    if (i + 1 < f->ntabs && !sel && i + 1 != f->active)
+      fill(dc, r.right - 1, px(f, 7), r.right, b - px(f, 7), line);
+    if (!sel) fill(dc, r.left, b - 1, r.right, b, line);  // the bar's edge
+
+    close_rect(f, &r, &c);
+    RECT text = r;
+    int inset = c.right - r.left + px(f, 4);  // keep the title centered
+    text.left += inset;
+    text.right -= inset;
+    SetTextColor(dc, sel ? g_fg : dim);
+    DrawTextW(dc, t->title ? t->title : L"Ghostty", -1, &text,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                  DT_NOPREFIX);
+
+    if (over) {
+      if (f->hover_close)
+        fill(dc, c.left, c.top, c.right, c.bottom,
+             mix(sel ? g_bg : hover, g_fg, 0.15));
+      int m = px(f, 4.5);
+      COLORREF xc = sel ? g_fg : dim;
+      stroke(dc, c.left + m, c.top + m, c.right - m, c.bottom - m, lw, xc);
+      stroke(dc, c.right - m, c.top + m, c.left + m, c.bottom - m, lw, xc);
+    }
+  }
+
+  // The new-tab button.
+  int x0 = width - b;
+  if (f->hover_plus) fill(dc, x0, 0, width, b, hover);
+  fill(dc, x0, b - 1, width, b, line);
+  int cx = x0 + b / 2, cy = b / 2, h = px(f, 6);
+  stroke(dc, cx - h, cy, cx + h + 1, cy, lw, dim);
+  stroke(dc, cx, cy - h, cx, cy + h + 1, lw, dim);
+}
+
+static void paint_frame(Frame* f) {
+  PAINTSTRUCT ps;
+  HDC dc = BeginPaint(f->hwnd, &ps);
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  int b = bar_height(f);
+  if (b > 0 && rc.right > 0) {
+    // Draw off screen, then copy: no flicker while the mouse moves.
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, b);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    draw_bar(f, mem, rc.right, b);
+    BitBlt(dc, 0, 0, rc.right, b, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+  }
+  EndPaint(f->hwnd, &ps);
+}
+
+static void invalidate_bar(Frame* f) {
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  rc.bottom = bar_height(f);
+  if (rc.bottom > 0) InvalidateRect(f->hwnd, &rc, FALSE);
+}
+
+// ---------------------------------------------------------------------------
+// Tabs
+
+static int tab_index(Frame* f, Window* w) {
+  for (int i = 0; i < f->ntabs; i++)
+    if (f->tabs[i] == w) return i;
+  return -1;
+}
+
+static void update_title(Frame* f) {
+  Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
+  SetWindowTextW(f->hwnd, w && w->title ? w->title : L"Ghostty");
+}
+
+// Size every tab to the client area under the tab bar. The hidden ones
+// too, so switching to one shows a frame of the right size at once.
+static void layout(Frame* f) {
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  if (rc.right <= 0 || rc.bottom <= 0) return;  // minimized
+  int b = bar_height(f);
+  int h = rc.bottom > b ? rc.bottom - b : 0;
+  for (int i = 0; i < f->ntabs; i++)
+    SetWindowPos(f->tabs[i]->hwnd, NULL, 0, b, rc.right, h,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+  InvalidateRect(f->hwnd, NULL, FALSE);
+}
+
+// Show tab i and hide the one shown before. A hidden tab's surface is
+// told it is occluded, so its renderer stops drawing frames nobody sees.
+static void select_tab(Frame* f, int i) {
+  if (i < 0 || i >= f->ntabs) return;
+  Window* old = f->active >= 0 && f->active < f->ntabs ? f->tabs[f->active]
+                                                        : NULL;
+  Window* w = f->tabs[i];
+  f->active = i;
+  if (old != w) ghostty_surface_set_occlusion(w->surface, true);
+  ShowWindow(w->hwnd, SW_SHOW);
+  if (GetActiveWindow() == f->hwnd) SetFocus(w->hwnd);
+  if (old && old != w) {
+    ShowWindow(old->hwnd, SW_HIDE);
+    ghostty_surface_set_occlusion(old->surface, false);
+  }
+  update_title(f);
+  invalidate_bar(f);
+}
+
+// Take a tab out of its Frame (it closed, or moves to another window).
+static void detach_tab(Frame* f, Window* w) {
+  int i = tab_index(f, w);
+  if (i < 0) return;
+  memmove(&f->tabs[i], &f->tabs[i + 1],
+          (size_t)(f->ntabs - i - 1) * sizeof(f->tabs[0]));
+  f->ntabs--;
+  if (f->destroying) return;
+  if (f->ntabs == 0) {
+    f->active = -1;
+    PostMessageW(f->hwnd, WM_GHOSTTY_DESTROY, 0, 0);
+    return;
+  }
+  if (i == f->active) {
+    // The tab that takes its place, or the last one.
+    f->active = -1;
+    layout(f);
+    select_tab(f, i < f->ntabs ? i : f->ntabs - 1);
+  } else {
+    if (i < f->active) f->active--;
+    layout(f);
+  }
+}
+
+static bool insert_tab(Frame* f, Window* w, int at) {
+  if (f->ntabs == f->cap) {
+    int cap = f->cap ? f->cap * 2 : 4;
+    Window** p = realloc(f->tabs, (size_t)cap * sizeof(*p));
+    if (!p) return false;
+    f->tabs = p;
+    f->cap = cap;
+  }
+  if (at < 0 || at > f->ntabs) at = f->ntabs;
+  memmove(&f->tabs[at + 1], &f->tabs[at],
+          (size_t)(f->ntabs - at) * sizeof(f->tabs[0]));
+  f->tabs[at] = w;
+  f->ntabs++;
+  if (f->active >= at) f->active++;
+  w->frame = f;
+  return true;
+}
+
+// Give a tab the size of its place in the Frame now (its WM_SIZE may have
+// come before it had a surface).
+static void size_tab(Window* w) {
+  RECT rc;
+  GetClientRect(w->hwnd, &rc);
+  if (rc.right > 0 && rc.bottom > 0)
+    ghostty_surface_set_size(w->surface, (uint32_t)rc.right,
+                             (uint32_t)rc.bottom);
+}
+
+// A new tab in f, after the selected one (or at the end), inheriting the
+// working directory and font size of `from` when there is one.
+static Window* new_tab(Frame* f, ghostty_surface_t from,
+                       ghostty_surface_context_e context) {
+  Window* w = calloc(1, sizeof(Window));
+  if (!w) return NULL;
+  w->frame = f;
+  w->scale = f->scale;
+  w->hwnd = CreateWindowExW(0, kTerminalClass, L"", WS_CHILD | WS_CLIPSIBLINGS,
+                            0, 0, 0, 0, f->hwnd, NULL, g_inst, NULL);
+  if (!w->hwnd) {
+    free(w);
+    return NULL;
+  }
+  SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
+
+  ghostty_surface_config_s cfg = from ? ghostty_surface_inherited_config(from, context)
+                                      : ghostty_surface_config_new();
+  cfg.platform_tag = GHOSTTY_PLATFORM_WINDOWS;
+  cfg.platform.windows.hwnd = w->hwnd;
+  cfg.userdata = w;
+  cfg.scale_factor = w->scale;
+  cfg.context = context;
+  w->surface = ghostty_surface_new(g_app, &cfg);
+  if (!w->surface || !insert_tab(f, w, g_new_tab_at_end || f->active < 0
+                                           ? f->ntabs
+                                           : f->active + 1)) {
+    fprintf(stderr, "ghostty: could not create the terminal surface\n");
+    if (w->surface) ghostty_surface_free(w->surface);
+    SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, 0);
+    DestroyWindow(w->hwnd);
+    free(w);
+    return NULL;
+  }
+  ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
+  layout(f);
+  size_tab(w);
+  select_tab(f, tab_index(f, w));
+  return w;
+}
+
+// Move the selected tab by `amount`, wrapping around the ends.
+static void move_tab(Frame* f, int amount) {
+  int n = f->ntabs, from = f->active;
+  int to = ((from + amount) % n + n) % n;
+  Window* w = f->tabs[from];
+  if (to > from)
+    memmove(&f->tabs[from], &f->tabs[from + 1],
+            (size_t)(to - from) * sizeof(w));
+  else
+    memmove(&f->tabs[to + 1], &f->tabs[to], (size_t)(from - to) * sizeof(w));
+  f->tabs[to] = w;
+  f->active = to;
+  invalidate_bar(f);
+}
+
+// Close a tab as its close button does: Ghostty asks the surface to close
+// and calls close_surface_cb when it does.
+static void close_tab(Window* w) { ghostty_surface_request_close(w->surface); }
+
+// ---------------------------------------------------------------------------
+// Windows
+
+static double window_scale(HWND hwnd) {
+  UINT dpi = GetDpiForWindow(hwnd);
+  return dpi ? dpi / 96.0 : 1.0;
+}
+
+static Frame* new_frame(void) {
+  Frame* f = calloc(1, sizeof(Frame));
+  if (!f) return NULL;
+  f->active = -1;
+  f->hover = -1;
+  f->hwnd = CreateWindowExW(0, kFrameClass, L"Ghostty",
+                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                            CW_USEDEFAULT, CW_USEDEFAULT, 1000, 640, NULL,
+                            NULL, g_inst, NULL);
+  if (!f->hwnd) {
+    free(f);
+    return NULL;
+  }
+  f->scale = window_scale(f->hwnd);
+  SetWindowLongPtrW(f->hwnd, GWLP_USERDATA, (LONG_PTR)f);
+  f->next = g_frames;
+  g_frames = f;
+  return f;
+}
+
+static void show_frame(Frame* f) {
+  ShowWindow(f->hwnd, f->next ? SW_SHOWNORMAL : SW_SHOWDEFAULT);
+  if (config_fullscreen()) set_fullscreen(f, true);
+  SetForegroundWindow(f->hwnd);
+  if (f->active >= 0) SetFocus(f->tabs[f->active]->hwnd);
+}
+
+static bool new_window(ghostty_surface_t from) {
+  Frame* f = new_frame();
+  if (!f) return false;
+  if (!new_tab(f, from, GHOSTTY_SURFACE_CONTEXT_WINDOW)) {
+    DestroyWindow(f->hwnd);
+    return false;
+  }
+  show_frame(f);
+  return true;
+}
+
+// The window an action without a surface means: the one in front.
+static Frame* front_frame(void) {
+  HWND fg = GetForegroundWindow();
+  for (Frame* f = g_frames; f; f = f->next)
+    if (f->hwnd == fg) return f;
+  return g_frames;
+}
+
+// ---------------------------------------------------------------------------
 // Runtime callbacks
 
 static void wakeup_cb(void* ud) {
@@ -454,6 +913,7 @@ static bool action_cb(ghostty_app_t app, ghostty_target_s target,
                       ghostty_action_s action) {
   (void)app;
   Window* w = target_window(target);
+  Frame* f = w ? w->frame : NULL;
   switch (action.tag) {
     case GHOSTTY_ACTION_RENDER:
       if (!w) return false;
@@ -465,25 +925,106 @@ static bool action_cb(ghostty_app_t app, ghostty_target_s target,
       if (!w || !action.action.set_title.title) return false;
       WCHAR* t = utf8_to_utf16(action.action.set_title.title, -1);
       if (t) {
-        SetWindowTextW(w->hwnd, t);
-        free(t);
+        free(w->title);
+        w->title = t;
+        if (f->active >= 0 && f->tabs[f->active] == w) update_title(f);
+        invalidate_bar(f);
       }
       return true;
     }
 
+    case GHOSTTY_ACTION_NEW_TAB:
+      if (!f) f = front_frame();
+      if (!f) return new_window(NULL);
+      return new_tab(f, w ? w->surface : NULL, GHOSTTY_SURFACE_CONTEXT_TAB) != NULL;
+
+    case GHOSTTY_ACTION_NEW_WINDOW:
+      return new_window(w ? w->surface : NULL);
+
+    case GHOSTTY_ACTION_GOTO_TAB: {
+      // With one tab there is nowhere to go: not performed, so the key
+      // reaches the terminal (the bindings are performable).
+      if (!f || f->ntabs < 2) return false;
+      int n = f->ntabs, cur = tab_index(f, w), to;
+      int v = (int)action.action.goto_tab;
+      if (v == GHOSTTY_GOTO_TAB_PREVIOUS)
+        to = (cur - 1 + n) % n;
+      else if (v == GHOSTTY_GOTO_TAB_NEXT)
+        to = (cur + 1) % n;
+      else if (v == GHOSTTY_GOTO_TAB_LAST)
+        to = n - 1;
+      else if (v >= 1)
+        to = v - 1 < n - 1 ? v - 1 : n - 1;  // 1-based; past the end: last
+      else
+        return false;
+      select_tab(f, to);
+      return true;
+    }
+
+    case GHOSTTY_ACTION_MOVE_TAB:
+      if (!f || f->ntabs < 2) return false;
+      move_tab(f, (int)action.action.move_tab.amount);
+      return true;
+
+    case GHOSTTY_ACTION_CLOSE_TAB: {
+      if (!f) return false;
+      int me = tab_index(f, w);
+      // Collect first: closing changes the list (the close is posted, but
+      // a surface may close at once).
+      Window* list[256];
+      int n = 0;
+      for (int i = 0; i < f->ntabs && n < 256; i++) {
+        bool pick = false;
+        switch (action.action.close_tab_mode) {
+          case GHOSTTY_ACTION_CLOSE_TAB_MODE_THIS: pick = i == me; break;
+          case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER: pick = i != me; break;
+          case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT: pick = i > me; break;
+        }
+        if (pick) list[n++] = f->tabs[i];
+      }
+      for (int i = 0; i < n; i++) close_tab(list[i]);
+      return true;
+    }
+
+    case GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW: {
+      if (!f || f->ntabs < 2) return false;
+      Frame* nf = new_frame();
+      if (!nf) return false;
+      detach_tab(f, w);
+      SetParent(w->hwnd, nf->hwnd);
+      if (!insert_tab(nf, w, 0)) {
+        // Out of memory: put it back where it was.
+        SetParent(w->hwnd, f->hwnd);
+        insert_tab(f, w, f->ntabs);
+        layout(f);
+        DestroyWindow(nf->hwnd);
+        return false;
+      }
+      layout(nf);
+      size_tab(w);
+      select_tab(nf, 0);
+      show_frame(nf);
+      return true;
+    }
+
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
-      if (!w) return false;
-      set_fullscreen(w, !w->fullscreen);
+      if (!f) return false;
+      set_fullscreen(f, !f->fullscreen);
       return true;
 
     case GHOSTTY_ACTION_RING_BELL:
-      if (w) FlashWindow(w->hwnd, TRUE);
+      if (f) FlashWindow(f->hwnd, TRUE);
       MessageBeep(MB_OK);
       return true;
 
     case GHOSTTY_ACTION_CLOSE_WINDOW:
-      if (!w) return false;
-      PostMessageW(w->hwnd, WM_GHOSTTY_DESTROY, 0, 0);
+      if (!f) return false;
+      PostMessageW(f->hwnd, WM_CLOSE, 0, 0);
+      return true;
+
+    case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS:
+      for (Frame* x = g_frames; x; x = x->next)
+        PostMessageW(x->hwnd, WM_CLOSE, 0, 0);
       return true;
 
     case GHOSTTY_ACTION_QUIT:
@@ -502,21 +1043,18 @@ static void close_surface_cb(void* ud, bool process_alive) {
 }
 
 // ---------------------------------------------------------------------------
-// Windows
+// Window procedures
 
-static double window_scale(HWND hwnd) {
-  UINT dpi = GetDpiForWindow(hwnd);
-  return dpi ? dpi / 96.0 : 1.0;
-}
-
+// A tab: its surface's input and frames.
 static LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   Window* w = (Window*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-  if (!w) return DefWindowProcW(hwnd, msg, wp, lp);
+  if (!w || !w->surface) return DefWindowProcW(hwnd, msg, wp, lp);
 
   switch (msg) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-      // Let Windows have Alt+F4 and Alt+Space (the window menu).
+      // Let Windows have Alt+F4 and Alt+Space (the window menu); for a
+      // child window DefWindowProc hands them to the top-level window.
       if (msg == WM_SYSKEYDOWN && (wp == VK_F4 || wp == VK_SPACE)) break;
       handle_key(w, msg, wp, lp);
       return 0;
@@ -570,17 +1108,9 @@ static LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
       break;
 
     case WM_SIZE:
-      if (w->surface && wp != SIZE_MINIMIZED)
+      if (wp != SIZE_MINIMIZED && LOWORD(lp) && HIWORD(lp))
         ghostty_surface_set_size(w->surface, LOWORD(lp), HIWORD(lp));
       return 0;
-    case WM_DPICHANGED: {
-      w->scale = HIWORD(wp) / 96.0;
-      ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
-      const RECT* r = (const RECT*)lp;
-      SetWindowPos(hwnd, NULL, r->left, r->top, r->right - r->left,
-                   r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
-      return 0;
-    }
     case WM_SETFOCUS:
       ghostty_surface_set_focus(w->surface, true);
       return 0;
@@ -594,22 +1124,132 @@ static LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
       paint(w);
       return 0;
 
-    case WM_CLOSE:
-      // Ghostty asks for confirmation if a process still runs, then
-      // calls close_surface_cb.
-      ghostty_surface_request_close(w->surface);
+    case WM_GHOSTTY_DESTROY:
+      DestroyWindow(hwnd);
       return 0;
+    case WM_DESTROY: {
+      Frame* f = w->frame;
+      ghostty_surface_free(w->surface);
+      w->surface = NULL;
+      SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+      detach_tab(f, w);
+      free(w->title);
+      free(w->bgra);
+      free(w);
+      return 0;
+    }
+  }
+  return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void track_bar_mouse(Frame* f, int x, int y) {
+  int i;
+  BarHit hit = bar_hit(f, x, y, &i);
+  bool close = hit == HIT_CLOSE, plus = hit == HIT_PLUS;
+  if (i != f->hover || close != f->hover_close || plus != f->hover_plus) {
+    f->hover = i;
+    f->hover_close = close;
+    f->hover_plus = plus;
+    invalidate_bar(f);
+  }
+  if (!f->tracking && hit != HIT_NONE) {
+    TRACKMOUSEEVENT t = {sizeof(t), TME_LEAVE, f->hwnd, 0};
+    f->tracking = TrackMouseEvent(&t);
+  }
+}
+
+// A window: the tab bar, and the tabs as child windows below it.
+static LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  Frame* f = (Frame*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+  if (!f) return DefWindowProcW(hwnd, msg, wp, lp);
+
+  switch (msg) {
+    case WM_SIZE:
+      if (wp != SIZE_MINIMIZED) layout(f);
+      return 0;
+    case WM_DPICHANGED: {
+      f->scale = HIWORD(wp) / 96.0;
+      for (int i = 0; i < f->ntabs; i++) {
+        Window* w = f->tabs[i];
+        w->scale = f->scale;
+        ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
+      }
+      const RECT* r = (const RECT*)lp;
+      SetWindowPos(hwnd, NULL, r->left, r->top, r->right - r->left,
+                   r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+      layout(f);
+      return 0;
+    }
+    case WM_SETFOCUS:
+      if (f->active >= 0) SetFocus(f->tabs[f->active]->hwnd);
+      return 0;
+
+    case WM_MOUSEMOVE:
+      track_bar_mouse(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      return 0;
+    case WM_MOUSELEAVE:
+      f->tracking = false;
+      f->hover = -1;
+      f->hover_close = f->hover_plus = false;
+      invalidate_bar(f);
+      return 0;
+    case WM_LBUTTONDOWN: {
+      int i;
+      switch (bar_hit(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &i)) {
+        case HIT_TAB: select_tab(f, i); break;
+        case HIT_CLOSE: close_tab(f->tabs[i]); break;
+        case HIT_PLUS: {
+          Window* cur = f->active >= 0 ? f->tabs[f->active] : NULL;
+          new_tab(f, cur ? cur->surface : NULL, GHOSTTY_SURFACE_CONTEXT_TAB);
+          break;
+        }
+        default: break;
+      }
+      return 0;
+    }
+    case WM_MBUTTONUP: {
+      int i;
+      BarHit hit = bar_hit(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &i);
+      if (hit == HIT_TAB || hit == HIT_CLOSE) close_tab(f->tabs[i]);
+      return 0;
+    }
+
+    case WM_ERASEBKGND:
+      return 1;
+    case WM_PAINT:
+      paint_frame(f);
+      return 0;
+
+    case WM_CLOSE: {
+      // Close every tab; the last one to go takes the window with it.
+      Window* list[256];
+      int n = 0;
+      for (int i = 0; i < f->ntabs && n < 256; i++) list[n++] = f->tabs[i];
+      for (int i = 0; i < n; i++) close_tab(list[i]);
+      if (n == 0) DestroyWindow(hwnd);
+      return 0;
+    }
     case WM_GHOSTTY_DESTROY:
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
-      if (w->surface) ghostty_surface_free(w->surface);
-      w->surface = NULL;
-      SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-      free(w->bgra);
-      free(w);
-      if (--g_windows == 0) PostQuitMessage(0);
+      // The tabs' own WM_DESTROY comes after this one (children go after
+      // their parent); they must not rearrange a window that is going.
+      f->destroying = true;
       return 0;
+    case WM_NCDESTROY: {
+      SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+      for (Frame** p = &g_frames; *p; p = &(*p)->next)
+        if (*p == f) {
+          *p = f->next;
+          break;
+        }
+      if (f->font) DeleteObject(f->font);
+      free(f->tabs);
+      free(f);
+      if (!g_frames) PostQuitMessage(0);
+      return 0;
+    }
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -624,45 +1264,6 @@ static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-static bool new_window(HINSTANCE inst) {
-  Window* w = calloc(1, sizeof(Window));
-  if (!w) return false;
-  w->hwnd = CreateWindowExW(0, kTerminalClass, L"Ghostty", WS_OVERLAPPEDWINDOW,
-                            CW_USEDEFAULT, CW_USEDEFAULT, 1000, 640, NULL, NULL,
-                            inst, NULL);
-  if (!w->hwnd) {
-    free(w);
-    return false;
-  }
-  w->scale = window_scale(w->hwnd);
-  SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
-
-  ghostty_surface_config_s cfg = ghostty_surface_config_new();
-  cfg.platform_tag = GHOSTTY_PLATFORM_WINDOWS;
-  cfg.platform.windows.hwnd = w->hwnd;
-  cfg.userdata = w;
-  cfg.scale_factor = w->scale;
-  w->surface = ghostty_surface_new(g_app, &cfg);
-  if (!w->surface) {
-    fprintf(stderr, "ghostty: could not create the terminal surface\n");
-    SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, 0);
-    DestroyWindow(w->hwnd);
-    free(w);
-    return false;
-  }
-  g_windows++;
-
-  RECT rc;
-  GetClientRect(w->hwnd, &rc);
-  ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
-  ghostty_surface_set_size(w->surface, (uint32_t)rc.right, (uint32_t)rc.bottom);
-  ShowWindow(w->hwnd, SW_SHOWDEFAULT);
-  if (config_fullscreen()) set_fullscreen(w, true);
-  SetForegroundWindow(w->hwnd);
-  SetFocus(w->hwnd);
-  return true;
 }
 
 int main(int argc, char** argv) {
@@ -683,24 +1284,33 @@ int main(int argc, char** argv) {
     ghostty_diagnostic_s d = ghostty_config_get_diagnostic(g_config, i);
     fprintf(stderr, "ghostty: config: %s\n", d.message);
   }
+  read_host_config();
 
-  HINSTANCE inst = GetModuleHandleW(NULL);
+  g_inst = GetModuleHandleW(NULL);
+  WNDCLASSEXW fc = {sizeof(fc)};
+  fc.style = CS_HREDRAW;
+  fc.lpfnWndProc = frame_proc;
+  fc.hInstance = g_inst;
+  fc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+  fc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(1));
+  fc.lpszClassName = kFrameClass;
+  RegisterClassExW(&fc);
+
   WNDCLASSEXW wc = {sizeof(wc)};
   wc.style = CS_HREDRAW | CS_VREDRAW;
   wc.lpfnWndProc = terminal_proc;
-  wc.hInstance = inst;
+  wc.hInstance = g_inst;
   wc.hCursor = LoadCursorW(NULL, IDC_IBEAM);
-  wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
   wc.lpszClassName = kTerminalClass;
   RegisterClassExW(&wc);
 
   WNDCLASSEXW wk = {sizeof(wk)};
   wk.lpfnWndProc = wakeup_proc;
-  wk.hInstance = inst;
+  wk.hInstance = g_inst;
   wk.lpszClassName = kWakeupClass;
   RegisterClassExW(&wk);
   g_wakeup_hwnd = CreateWindowExW(0, kWakeupClass, L"", 0, 0, 0, 0, 0,
-                                  HWND_MESSAGE, NULL, inst, NULL);
+                                  HWND_MESSAGE, NULL, g_inst, NULL);
 
   ghostty_runtime_config_s rt = {0};
   rt.userdata = NULL;
@@ -718,13 +1328,17 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (!new_window(inst)) return 1;
+  if (!new_window(NULL)) return 1;
 
   MSG msg;
   while (GetMessageW(&msg, NULL, 0, 0) > 0) {
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }
+
+  // Quit (not the last window closing): free the surfaces still open
+  // before the app that owns them.
+  while (g_frames) DestroyWindow(g_frames->hwnd);
 
   ghostty_app_free(g_app);
   ghostty_config_free(g_config);
