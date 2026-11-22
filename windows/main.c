@@ -116,6 +116,13 @@ int main(int argc, char** argv) {
   int rc = 0;
   if (report_mode(&rc)) return rc;
   if (buildinfo_mode(argc, argv)) return 0;
+#ifdef GHOSTTY_PRESENT_DEFAULT_SWAP
+  // A dogfood build (HOST_PRESENT_DEFAULT=swap for windows/build.sh): the
+  // renderer draws into the windows itself unless GHOSTTY_PRESENT says
+  // otherwise (=readback: frames through the CPU). _putenv, not
+  // SetEnvironmentVariable: libghostty reads the CRT's copy (getenv).
+  if (!getenv("GHOSTTY_PRESENT")) _putenv("GHOSTTY_PRESENT=swap");
+#endif
   if (stats_client_mode(argc, argv, &rc)) return rc;
   stderr_guard_start();
   g_main_tid = GetCurrentThreadId();
