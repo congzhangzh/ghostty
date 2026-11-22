@@ -46,6 +46,21 @@ int frame_border_y(HWND hwnd) {
          GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
 }
 
+// Windows' buttons' place in the bar: minimize | maximize | close in equal
+// columns, or 0 elsewhere (screen point in lp).
+static LRESULT button_hit(Frame* f, LPARAM lp) {
+  if (f->buttons_w <= 0) return 0;
+  POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+  ScreenToClient(f->hwnd, &p);
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  if (p.y < 0 || p.y >= bar_height(f) || p.x < rc.right - f->buttons_w ||
+      p.x >= rc.right)
+    return 0;
+  int col = (p.x - (rc.right - f->buttons_w)) * 3 / f->buttons_w;
+  return col <= 0 ? HTMINBUTTON : col == 1 ? HTMAXBUTTON : HTCLOSE;
+}
+
 LRESULT titlebar_hit(Frame* f, WPARAM wp, LPARAM lp) {
   // The side and bottom borders are still the system's.
   LRESULT r = DefWindowProcW(f->hwnd, WM_NCHITTEST, wp, lp);
@@ -58,6 +73,8 @@ LRESULT titlebar_hit(Frame* f, WPARAM wp, LPARAM lp) {
   // The top edge resizes, over the tabs too.
   if (p.y >= 0 && p.y < edge && !IsZoomed(f->hwnd))
     return p.x < edge ? HTTOPLEFT : p.x >= rc.right - edge ? HTTOPRIGHT : HTTOP;
+  LRESULT button = button_hit(f, lp);
+  if (button) return button;
   BarHit hit = bar_hit(f, p.x, p.y, &i);
   // In the bar, what is not a tab or the + is the caption.
   if (hit == HIT_NONE && p.y >= 0 && p.y < bar_height(f)) return HTCAPTION;
@@ -110,6 +127,27 @@ void titlebar_update(Frame* f) {
   BOOL dark = bar_is_dark();
   DwmSetWindowAttribute(f->hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
                         sizeof(dark));
+}
+
+// The window menu (Windows' own items, with About and What's new) at a
+// screen point: from a right-click on the title bar or the tab bar, from
+// Alt+Space or a Shift+right-click in the terminal (full screen has no
+// title bar). DefWindowProc does not open it for a caption in the client
+// area, so the host does, and sends the choice as WM_SYSCOMMAND.
+void show_window_menu(Frame* f, int x, int y) {
+  HMENU m = GetSystemMenu(f->hwnd, FALSE);
+  if (!m) return;
+  bool zoomed = IsZoomed(f->hwnd), fixed = zoomed || f->fullscreen;
+  EnableMenuItem(m, SC_RESTORE, MF_BYCOMMAND | (zoomed ? MF_ENABLED : MF_GRAYED));
+  EnableMenuItem(m, SC_MOVE, MF_BYCOMMAND | (fixed ? MF_GRAYED : MF_ENABLED));
+  EnableMenuItem(m, SC_SIZE, MF_BYCOMMAND | (fixed ? MF_GRAYED : MF_ENABLED));
+  EnableMenuItem(m, SC_MINIMIZE, MF_BYCOMMAND | MF_ENABLED);
+  EnableMenuItem(m, SC_MAXIMIZE, MF_BYCOMMAND | (fixed ? MF_GRAYED : MF_ENABLED));
+  SetForegroundWindow(f->hwnd);  // else the menu does not close on a click away
+  UINT align = GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN;
+  int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | align, x, y, 0,
+                           f->hwnd, NULL);
+  if (cmd) PostMessageW(f->hwnd, WM_SYSCOMMAND, (WPARAM)cmd, 0);
 }
 
 void titlebar_choose(void) {
@@ -215,8 +253,14 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (!f) return DefWindowProcW(hwnd, msg, wp, lp);
 
   if (titlebar_active(f)) {
-    // Windows' caption buttons, drawn by DWM in the bar: DWM answers for
-    // them (hover, presses, snap layouts).
+    // Windows' caption buttons, drawn by DWM in the bar. Where they are the
+    // host says so itself (a maximized window's buttons did not answer on
+    // the owner's box when DWM alone did); then DWM handles the rest (hover,
+    // presses, snap layouts), and what it leaves, the host does below.
+    if (msg == WM_NCHITTEST) {
+      LRESULT b = button_hit(f, lp);
+      if (b) return b;
+    }
     LRESULT r;
     if (DwmDefWindowProc(hwnd, msg, wp, lp, &r)) return r;
   }
@@ -239,6 +283,59 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     case WM_SYSCOMMAND:
       if (about_command(hwnd, wp)) return 0;
+      break;
+    // Windows' caption buttons when DwmDefWindowProc did not take the click:
+    // the press is ours (DefWindowProc would draw a classic button), the
+    // release over the same button acts.
+    case WM_NCLBUTTONDOWN:
+      if (titlebar_active(f) &&
+          (wp == HTMINBUTTON || wp == HTMAXBUTTON || wp == HTCLOSE)) {
+        f->nc_pressed = wp;
+        return 0;
+      }
+      break;
+    case WM_NCLBUTTONUP:
+      if (titlebar_active(f) &&
+          (wp == HTMINBUTTON || wp == HTMAXBUTTON || wp == HTCLOSE)) {
+        WPARAM pressed = f->nc_pressed;
+        f->nc_pressed = 0;
+        if (pressed == wp)
+          SendMessageW(hwnd, WM_SYSCOMMAND,
+                       wp == HTMINBUTTON   ? SC_MINIMIZE
+                       : wp == HTCLOSE     ? SC_CLOSE
+                       : IsZoomed(hwnd)    ? SC_RESTORE
+                                           : SC_MAXIMIZE,
+                       0);
+        return 0;
+      }
+      break;
+    case WM_NCRBUTTONDOWN:
+      // Ours, so the release comes to WM_NCRBUTTONUP: DefWindowProc would
+      // take it in a loop of its own and, judging the point by its own
+      // frame (client area here), open no menu.
+      if (titlebar_active(f) && wp == HTCAPTION) return 0;
+      break;
+    case WM_NCRBUTTONUP:
+      if (titlebar_active(f) && wp == HTCAPTION) {
+        show_window_menu(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+      }
+      break;
+    case WM_CONTEXTMENU:
+      // DefWindowProc turns a right-click on a caption into this (it takes
+      // the button's release itself), and Shift+F10 too (lp -1): the window
+      // menu, at the point or the window's top left.
+      if (titlebar_active(f)) {
+        POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (lp == -1) {
+          p.x = p.y = 0;
+          ClientToScreen(hwnd, &p);
+        } else if (SendMessageW(hwnd, WM_NCHITTEST, 0, lp) != HTCAPTION) {
+          break;
+        }
+        show_window_menu(f, p.x, p.y);
+        return 0;
+      }
       break;
     case WM_NCLBUTTONDBLCLK:
       // The bar's caption, double-clicked: maximize or restore, here and
@@ -323,6 +420,16 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           break;
         }
         default: break;
+      }
+      return 0;
+    }
+    case WM_RBUTTONUP: {
+      // A right-click in the tab bar (also full screen's): the window menu.
+      int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+      if (y >= 0 && y < bar_height(f)) {
+        POINT sp = {x, y};
+        ClientToScreen(hwnd, &sp);
+        show_window_menu(f, sp.x, sp.y);
       }
       return 0;
     }

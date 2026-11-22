@@ -142,6 +142,7 @@ struct Frame {
   // Tabs in the title bar: the width and height Windows' caption buttons
   // take (client pixels), and a tab pressed that may become a window drag.
   int buttons_w, buttons_h;
+  WPARAM nc_pressed;  // a caption button pressed (HTCLOSE…) the host acts on
   bool pressing;
   POINT press;
   HFONT font;
@@ -227,6 +228,7 @@ int bar_height(Frame* f);
 COLORREF bar_color(void);
 bool bar_is_dark(void);
 void titlebar_update(Frame* f);
+void show_window_menu(Frame* f, int x, int y);
 extern const WCHAR* const kMotto;
 bool slogan_shown(void);
 void about_menu_add(HWND hwnd);
