@@ -7,6 +7,23 @@ void take_frame(Window* w) {
   ghostty_frame_s f;
   if (!ghostty_surface_take_frame(w->surface, &f)) return;
 
+  if (!f.pixels) {
+    // Swapped into the window by the renderer: on screen already. Counted
+    // for the stats; the key that it answers is on screen now.
+    w->swap = true;
+    w->tick_frames++;
+    w->tick_readback_ms += f.readback_ns / 1e6;
+    if (w->key_qpc) {
+      w->latency_ms = (double)(qpc() - w->key_qpc) * g_qpc_ms;
+      w->key_qpc = 0;
+    }
+    w->frame_w = f.width;
+    w->frame_h = f.height;
+    ghostty_frame_free(&f);
+    return;
+  }
+  w->swap = false;
+
   size_t need = (size_t)f.width * f.height * 4;
   if (need > w->bgra_cap) {
     uint8_t* p = realloc(w->bgra, need);
@@ -47,6 +64,12 @@ void take_frame(Window* w) {
 void paint(Window* w) {
   PAINTSTRUCT ps;
   HDC dc = BeginPaint(w->hwnd, &ps);
+  if (w->swap) {
+    // OpenGL owns the window's pixels (the stats overlay is not drawn in
+    // this mode yet; the stats pipe still has the numbers).
+    EndPaint(w->hwnd, &ps);
+    return;
+  }
   RECT rc;
   GetClientRect(w->hwnd, &rc);
   // The stats overlay's box is left out of the frame's blit and drawn once

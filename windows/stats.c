@@ -126,8 +126,9 @@ static void publish_line(void) {
       Window* w = f->tabs[i];
       ghostty_surface_size_s sz = ghostty_surface_size(w->surface);
       char* title = w->title ? utf16_to_utf8(w->title, -1) : NULL;
-      put(&b, "%s{\"selected\":%s,\"title\":", i ? "," : "",
-          i == f->active ? "true" : "false");
+      put(&b, "%s{\"selected\":%s,\"present\":\"%s\",\"title\":",
+          i ? "," : "", i == f->active ? "true" : "false",
+          w->swap ? "swap" : "copy");
       put_string(&b, title ? title : "");
       free(title);
       put(&b,

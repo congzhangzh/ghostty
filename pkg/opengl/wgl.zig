@@ -111,6 +111,8 @@ extern "user32" fn ReleaseDC(hwnd: HWND, hdc: HDC) callconv(.winapi) c_int;
 extern "gdi32" fn ChoosePixelFormat(hdc: HDC, pfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) c_int;
 extern "gdi32" fn SetPixelFormat(hdc: HDC, format: c_int, pfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) BOOL;
 extern "opengl32" fn wglCreateContext(hdc: HDC) callconv(.winapi) ?HGLRC;
+extern "gdi32" fn DescribePixelFormat(hdc: HDC, format: c_int, size: u32, pfd: *PIXELFORMATDESCRIPTOR) callconv(.winapi) c_int;
+extern "gdi32" fn SwapBuffers(hdc: HDC) callconv(.winapi) BOOL;
 extern "opengl32" fn wglDeleteContext(hglrc: HGLRC) callconv(.winapi) BOOL;
 extern "opengl32" fn wglMakeCurrent(hdc: ?HDC, hglrc: ?HGLRC) callconv(.winapi) BOOL;
 extern "opengl32" fn wglGetProcAddress(name: [*:0]const u8) callconv(.winapi) ?PROC;
@@ -155,11 +157,24 @@ fn registerClass() Error!void {
     registered.store(true, .release);
 }
 
+/// A window the context draws into and swaps (GHOSTTY_PRESENT=swap): its
+/// DC, set to the context's pixel format.
+pub const Window = struct {
+    hwnd: HWND,
+    hdc: HDC,
+
+    /// Show what was drawn into the window's back buffer.
+    pub fn swap(self: Window) bool {
+        return SwapBuffers(self.hdc) != 0;
+    }
+};
+
 /// An OpenGL context with the hidden window whose DC it uses.
 pub const Context = struct {
     hwnd: HWND,
     hdc: HDC,
     hglrc: HGLRC,
+    format: c_int,
 
     /// Create an OpenGL core profile context of at least `major.minor`.
     /// Nothing is current on the calling thread when this returns.
@@ -230,13 +245,39 @@ pub const Context = struct {
             return error.CreateContextFailed;
         };
 
-        return .{ .hwnd = hwnd, .hdc = hdc, .hglrc = hglrc };
+        return .{ .hwnd = hwnd, .hdc = hdc, .hglrc = hglrc, .format = format };
     }
 
     pub fn destroy(self: Context) void {
         _ = wglDeleteContext(self.hglrc);
         _ = ReleaseDC(self.hwnd, self.hdc);
         _ = DestroyWindow(self.hwnd);
+    }
+
+    /// Draw into `hwnd` itself from now on: its DC gets this context's
+    /// pixel format (a window takes one once, for its life; the host's
+    /// window class has CS_OWNDC, so the DC stays the window's), and the
+    /// context is made current on it, on the calling thread.
+    pub fn attachWindow(self: Context, hwnd: HWND) Error!Window {
+        const hdc = GetDC(hwnd) orelse return error.GetDCFailed;
+        errdefer _ = ReleaseDC(hwnd, hdc);
+        var pfd: PIXELFORMATDESCRIPTOR = .{
+            .dwFlags = 0,
+            .iPixelType = 0,
+            .cColorBits = 0,
+            .cAlphaBits = 0,
+        };
+        if (DescribePixelFormat(hdc, self.format, @sizeOf(PIXELFORMATDESCRIPTOR), &pfd) == 0 or
+            SetPixelFormat(hdc, self.format, &pfd) == 0)
+        {
+            log.err("setting the window's pixel format failed err={}", .{GetLastError()});
+            return error.PixelFormatFailed;
+        }
+        if (wglMakeCurrent(hdc, self.hglrc) == 0) {
+            log.err("wglMakeCurrent on the window failed err={}", .{GetLastError()});
+            return error.MakeCurrentFailed;
+        }
+        return .{ .hwnd = hwnd, .hdc = hdc };
     }
 
     /// Make this context current on the calling thread.

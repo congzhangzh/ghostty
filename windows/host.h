@@ -96,6 +96,10 @@ typedef struct Window {
   uint32_t frame_w, frame_h;
   size_t bgra_cap;
 
+  // The renderer draws into this window itself (GHOSTTY_PRESENT=swap):
+  // frames come without pixels, and the host paints nothing over them.
+  bool swap;
+
   // A high surrogate from WM_CHAR waiting for its low half.
   WCHAR high_surrogate;
 

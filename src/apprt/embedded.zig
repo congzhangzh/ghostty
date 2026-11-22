@@ -2054,7 +2054,9 @@ pub const CAPI = struct {
             .width = memory.width,
             .height = memory.height,
             .stride = memory.width * 4,
-            .pixels = memory.pixels.ptr,
+            // None when the renderer drew into the window itself
+            // (GHOSTTY_PRESENT=swap): the frame is on screen already.
+            .pixels = if (memory.pixels.len > 0) memory.pixels.ptr else null,
             .handle = box,
             .gpu_wait_ns = memory.gpu_wait_ns,
             .readback_ns = memory.readback_ns,
