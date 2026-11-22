@@ -131,12 +131,15 @@ static uint32_t unshifted_codepoint(WPARAM vk) {
 
 // Collect the WM_CHAR / WM_SYSCHAR messages TranslateMessage queued for
 // this key press, so the key event carries the text it produced. A dead
-// key queues WM_DEADCHAR instead: the key is composing.
+// key queues WM_DEADCHAR instead: the key is composing. With Alt held they
+// come as WM_SYSCHAR / WM_SYSDEADCHAR, so the range runs up to those: left
+// in the queue, an Alt+key's character would arrive again as text after
+// the key (a bound Alt+2 also typed "2"; Alt+b sent ESC b, then b).
 static int take_chars(HWND hwnd, WCHAR* buf, int cap, bool* composing) {
   MSG msg;
   int n = 0;
   *composing = false;
-  while (PeekMessageW(&msg, hwnd, WM_CHAR, WM_DEADCHAR, PM_NOREMOVE)) {
+  while (PeekMessageW(&msg, hwnd, WM_CHAR, WM_SYSDEADCHAR, PM_NOREMOVE)) {
     if (msg.message != WM_CHAR && msg.message != WM_SYSCHAR &&
         msg.message != WM_DEADCHAR && msg.message != WM_SYSDEADCHAR)
       break;
