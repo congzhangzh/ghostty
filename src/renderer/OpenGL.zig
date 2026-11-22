@@ -225,6 +225,25 @@ fn prepareContext(getProcAddress: anytype) !void {
     // Register our debug message callback with the OpenGL context.
     gl.glad.context.DebugMessageCallback.?(glDebugMessageCallback, null);
 
+    // NVIDIA reports every read of the frame back into memory, which the
+    // CPU frame path does once a frame (on Windows), as performance warning
+    // 131154 "Pixel transfer is synchronized with 3D rendering", and it
+    // calls the callback from its own worker thread. That is a log line per
+    // frame; and when stderr is a pipe nobody drains (Windows PowerShell's
+    // `2>` for a GUI program), the write blocks that thread, the driver's
+    // other threads spin waiting on it, and the window stops responding.
+    // The readback is known (zero-copy presentation replaces it), so mute
+    // this one message.
+    const muted = [_]gl.c.GLuint{131154};
+    gl.glad.context.DebugMessageControl.?(
+        gl.c.GL_DEBUG_SOURCE_API,
+        gl.c.GL_DEBUG_TYPE_PERFORMANCE,
+        gl.c.GL_DONT_CARE,
+        muted.len,
+        &muted,
+        gl.c.GL_FALSE,
+    );
+
     // Enable SRGB framebuffer for linear blending support.
     try gl.enable(gl.c.GL_FRAMEBUFFER_SRGB);
 }
