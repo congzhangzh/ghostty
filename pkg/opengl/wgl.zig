@@ -280,6 +280,15 @@ pub const Context = struct {
         return .{ .hwnd = hwnd, .hdc = hdc };
     }
 
+    /// Make this context current on `window`'s DC again (after the window
+    /// changed size: Wine recreates a GL child window's drawable then).
+    pub fn rebind(self: Context, window: Window) Error!void {
+        if (wglMakeCurrent(window.hdc, self.hglrc) == 0) {
+            log.err("wglMakeCurrent on the window failed err={}", .{GetLastError()});
+            return error.MakeCurrentFailed;
+        }
+    }
+
     /// Make this context current on the calling thread.
     pub fn makeCurrent(self: Context) Error!void {
         if (wglMakeCurrent(self.hdc, self.hglrc) == 0) {
