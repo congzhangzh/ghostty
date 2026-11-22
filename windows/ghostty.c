@@ -54,6 +54,10 @@ typedef struct Window {
 
   // A high surrogate from WM_CHAR waiting for its low half.
   WCHAR high_surrogate;
+
+  // Full screen: the placement to go back to when it ends.
+  bool fullscreen;
+  WINDOWPLACEMENT placement;
 } Window;
 
 static ghostty_app_t g_app;
@@ -378,6 +382,47 @@ static void write_clipboard_cb(void* ud, ghostty_clipboard_e which,
 }
 
 // ---------------------------------------------------------------------------
+// Full screen
+
+// Full screen as Windows programs do it: no frame, the whole monitor the
+// window is on (not just its work area), on top. Windows hides the taskbar
+// for a foreground window that covers its monitor. Leaving restores the
+// placement saved on entry, maximized or not.
+static void set_fullscreen(Window* w, bool on) {
+  if (on == w->fullscreen) return;
+  LONG style = GetWindowLongW(w->hwnd, GWL_STYLE);
+  if (on) {
+    MONITORINFO mi = {sizeof(mi)};
+    w->placement.length = sizeof(w->placement);
+    if (!GetWindowPlacement(w->hwnd, &w->placement) ||
+        !GetMonitorInfoW(MonitorFromWindow(w->hwnd, MONITOR_DEFAULTTONEAREST),
+                         &mi))
+      return;
+    SetWindowLongW(w->hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+    SetWindowPos(w->hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                 mi.rcMonitor.right - mi.rcMonitor.left,
+                 mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+  } else {
+    SetWindowLongW(w->hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+    SetWindowPlacement(w->hwnd, &w->placement);
+    SetWindowPos(w->hwnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
+                     SWP_FRAMECHANGED);
+  }
+  w->fullscreen = on;
+}
+
+// The config's `fullscreen` (false, true, or a macOS-only variant, all
+// of which mean full screen here): whether a new window starts in it.
+static bool config_fullscreen(void) {
+  const char* v = NULL;
+  const char* key = "fullscreen";
+  if (!ghostty_config_get(g_config, &v, key, strlen(key)) || !v) return false;
+  return strcmp(v, "false") != 0;
+}
+
+// ---------------------------------------------------------------------------
 // Runtime callbacks
 
 static void wakeup_cb(void* ud) {
@@ -413,6 +458,11 @@ static bool action_cb(ghostty_app_t app, ghostty_target_s target,
       }
       return true;
     }
+
+    case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
+      if (!w) return false;
+      set_fullscreen(w, !w->fullscreen);
+      return true;
 
     case GHOSTTY_ACTION_RING_BELL:
       if (w) FlashWindow(w->hwnd, TRUE);
@@ -597,6 +647,7 @@ static bool new_window(HINSTANCE inst) {
   ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
   ghostty_surface_set_size(w->surface, (uint32_t)rc.right, (uint32_t)rc.bottom);
   ShowWindow(w->hwnd, SW_SHOWDEFAULT);
+  if (config_fullscreen()) set_fullscreen(w, true);
   SetForegroundWindow(w->hwnd);
   SetFocus(w->hwnd);
   return true;
