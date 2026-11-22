@@ -4852,8 +4852,22 @@ pub fn finalize(self: *Config) !void {
             switch (builtin.target.os.tag) {
                 .windows => {
                     if (self.command == null) {
-                        log.warn("no default shell found, will default to using cmd", .{});
-                        self.command = .{ .shell = "cmd.exe" };
+                        // PowerShell 7, else Windows PowerShell, else cmd.exe.
+                        var environ_map = try global.environMap();
+                        defer environ_map.deinit();
+                        const found = try internal_os.default_shell.probe(global.io(), alloc, &environ_map);
+                        const choice = internal_os.default_shell.choose(found);
+                        if (choice.path) |p| {
+                            log.info("default shell src=detect value={s} ({s})", .{ p, choice.why });
+                            // A direct command: the path may have spaces
+                            // (Program Files), which a shell command splits on.
+                            const argv = try alloc.alloc([:0]const u8, 1);
+                            argv[0] = p;
+                            self.command = .{ .direct = argv };
+                        } else {
+                            log.info("default shell src=detect value=cmd.exe ({s})", .{choice.why});
+                            self.command = .{ .shell = "cmd.exe" };
+                        }
                     }
 
                     if (wd == .home) {
