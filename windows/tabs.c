@@ -1,0 +1,455 @@
+#include "host.h"
+
+// ---------------------------------------------------------------------------
+// The tab bar
+//
+// Drawn by the Frame in its client area above the tabs, in the terminal's
+// own colors as macOS does: the selected tab has the terminal's background
+// and the others are darker; tabs share the width equally, the title is
+// centered, a tab under the mouse shows its close button on the left, and
+// the + at the right end opens a new tab.
+
+static int px(Frame* f, double points) { return (int)(points * f->scale + 0.5); }
+
+static int bar_height(Frame* f) {
+  bool show = g_tab_bar == TAB_BAR_ALWAYS ||
+              (g_tab_bar == TAB_BAR_AUTO && f->ntabs > 1);
+  return show ? px(f, 30) : 0;
+}
+
+static COLORREF mix(COLORREF a, COLORREF b, double t) {
+  return RGB((int)(GetRValue(a) * (1 - t) + GetRValue(b) * t + 0.5),
+             (int)(GetGValue(a) * (1 - t) + GetGValue(b) * t + 0.5),
+             (int)(GetBValue(a) * (1 - t) + GetBValue(b) * t + 0.5));
+}
+
+static bool is_dark(COLORREF c) {
+  return 0.299 * GetRValue(c) + 0.587 * GetGValue(c) + 0.114 * GetBValue(c) <
+         128;
+}
+
+static void tab_rect(Frame* f, int width, int b, int i, RECT* r) {
+  int area = width - b;  // the + button is b wide
+  if (area < 0) area = 0;
+  r->left = (int)((long long)area * i / f->ntabs);
+  r->right = (int)((long long)area * (i + 1) / f->ntabs);
+  r->top = 0;
+  r->bottom = b;
+}
+
+static void close_rect(Frame* f, const RECT* tab, RECT* r) {
+  int s = px(f, 16), pad = px(f, 7);
+  r->left = tab->left + pad;
+  r->right = r->left + s;
+  r->top = (tab->bottom - s) / 2;
+  r->bottom = r->top + s;
+}
+
+BarHit bar_hit(Frame* f, int x, int y, int* index) {
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  int b = bar_height(f);
+  *index = -1;
+  if (b == 0 || y < 0 || y >= b || x < 0 || x >= rc.right) return HIT_NONE;
+  if (x >= rc.right - b) return HIT_PLUS;
+  for (int i = 0; i < f->ntabs; i++) {
+    RECT t, c;
+    tab_rect(f, rc.right, b, i, &t);
+    if (x < t.left || x >= t.right) continue;
+    *index = i;
+    close_rect(f, &t, &c);
+    POINT p = {x, y};
+    return PtInRect(&c, p) ? HIT_CLOSE : HIT_TAB;
+  }
+  return HIT_NONE;
+}
+
+static HFONT bar_font(Frame* f) {
+  UINT dpi = (UINT)(f->scale * 96 + 0.5);
+  if (f->font && f->font_dpi == dpi) return f->font;
+  if (f->font) DeleteObject(f->font);
+  NONCLIENTMETRICSW m = {sizeof(m)};
+  LOGFONTW lf;
+  if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(m), &m, 0,
+                                 dpi)) {
+    lf = m.lfMessageFont;
+  } else {
+    memset(&lf, 0, sizeof(lf));
+    lf.lfHeight = -MulDiv(9, (int)dpi, 72);
+    wcscpy(lf.lfFaceName, L"Segoe UI");
+  }
+  f->font = CreateFontIndirectW(&lf);
+  f->font_dpi = dpi;
+  return f->font;
+}
+
+static void fill(HDC dc, int l, int t, int r, int b, COLORREF c) {
+  RECT x = {l, t, r, b};
+  SetDCBrushColor(dc, c);
+  FillRect(dc, &x, (HBRUSH)GetStockObject(DC_BRUSH));
+}
+
+static void stroke(HDC dc, int x0, int y0, int x1, int y1, int width,
+                   COLORREF c) {
+  HPEN pen = CreatePen(PS_SOLID, width, c);
+  HGDIOBJ old = SelectObject(dc, pen);
+  MoveToEx(dc, x0, y0, NULL);
+  LineTo(dc, x1, y1);
+  SelectObject(dc, old);
+  DeleteObject(pen);
+}
+
+static void draw_bar(Frame* f, HDC dc, int width, int b) {
+  bool dark = is_dark(g_bg);
+  COLORREF bar = mix(g_bg, RGB(0, 0, 0), dark ? 0.35 : 0.10);
+  COLORREF hover = mix(bar, g_bg, 0.5);
+  COLORREF line = mix(bar, g_fg, 0.12);
+  COLORREF dim = mix(g_fg, bar, 0.45);
+  int lw = px(f, 1.25) > 0 ? px(f, 1.25) : 1;
+
+  fill(dc, 0, 0, width, b, bar);
+  SelectObject(dc, bar_font(f));
+  SetBkMode(dc, TRANSPARENT);
+
+  for (int i = 0; i < f->ntabs; i++) {
+    Window* t = f->tabs[i];
+    RECT r, c;
+    tab_rect(f, width, b, i, &r);
+    bool sel = i == f->active, over = i == f->hover;
+    if (sel || over) fill(dc, r.left, r.top, r.right, r.bottom, sel ? g_bg : hover);
+    // A divider between two tabs that are not selected.
+    if (i + 1 < f->ntabs && !sel && i + 1 != f->active)
+      fill(dc, r.right - 1, px(f, 7), r.right, b - px(f, 7), line);
+    if (!sel) fill(dc, r.left, b - 1, r.right, b, line);  // the bar's edge
+
+    close_rect(f, &r, &c);
+    RECT text = r;
+    int inset = c.right - r.left + px(f, 4);  // keep the title centered
+    text.left += inset;
+    text.right -= inset;
+    SetTextColor(dc, sel ? g_fg : dim);
+    DrawTextW(dc, t->title ? t->title : L"Ghostty", -1, &text,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                  DT_NOPREFIX);
+
+    if (over) {
+      if (f->hover_close)
+        fill(dc, c.left, c.top, c.right, c.bottom,
+             mix(sel ? g_bg : hover, g_fg, 0.15));
+      int m = px(f, 4.5);
+      COLORREF xc = sel ? g_fg : dim;
+      stroke(dc, c.left + m, c.top + m, c.right - m, c.bottom - m, lw, xc);
+      stroke(dc, c.right - m, c.top + m, c.left + m, c.bottom - m, lw, xc);
+    }
+  }
+
+  // The new-tab button.
+  int x0 = width - b;
+  if (f->hover_plus) fill(dc, x0, 0, width, b, hover);
+  fill(dc, x0, b - 1, width, b, line);
+  int cx = x0 + b / 2, cy = b / 2, h = px(f, 6);
+  stroke(dc, cx - h, cy, cx + h + 1, cy, lw, dim);
+  stroke(dc, cx, cy - h, cx, cy + h + 1, lw, dim);
+}
+
+void paint_frame(Frame* f) {
+  PAINTSTRUCT ps;
+  HDC dc = BeginPaint(f->hwnd, &ps);
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  int b = bar_height(f);
+  if (b > 0 && rc.right > 0) {
+    // Draw off screen, then copy: no flicker while the mouse moves.
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, b);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    draw_bar(f, mem, rc.right, b);
+    BitBlt(dc, 0, 0, rc.right, b, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+  }
+  EndPaint(f->hwnd, &ps);
+}
+
+void invalidate_bar(Frame* f) {
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  rc.bottom = bar_height(f);
+  if (rc.bottom > 0) InvalidateRect(f->hwnd, &rc, FALSE);
+}
+
+// ---------------------------------------------------------------------------
+// Tabs
+
+int tab_index(Frame* f, Window* w) {
+  for (int i = 0; i < f->ntabs; i++)
+    if (f->tabs[i] == w) return i;
+  return -1;
+}
+
+// The window's title (the taskbar's too): the selected tab's title and
+// which build runs, "<title> \u2014 Ghostty <build>". The tabs show the
+// titles alone.
+void update_title(Frame* f) {
+  static const WCHAR app[] = L"Ghostty " WIDEN(GHOSTTY_BUILD_TAG);
+  Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
+  if (!w || !w->title || !*w->title) {
+    SetWindowTextW(f->hwnd, app);
+    return;
+  }
+  size_t n = wcslen(w->title) + wcslen(app) + 4;
+  WCHAR* t = malloc(n * sizeof(WCHAR));
+  if (!t) {
+    SetWindowTextW(f->hwnd, w->title);
+    return;
+  }
+  swprintf(t, n, L"%ls \u2014 %ls", w->title, app);
+  SetWindowTextW(f->hwnd, t);
+  free(t);
+}
+
+// Size every tab to the client area under the tab bar. The hidden ones
+// too, so switching to one shows a frame of the right size at once.
+void layout(Frame* f) {
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  if (rc.right <= 0 || rc.bottom <= 0) return;  // minimized
+  int b = bar_height(f);
+  int h = rc.bottom > b ? rc.bottom - b : 0;
+  for (int i = 0; i < f->ntabs; i++)
+    SetWindowPos(f->tabs[i]->hwnd, NULL, 0, b, rc.right, h,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+  InvalidateRect(f->hwnd, NULL, FALSE);
+}
+
+// Show tab i and hide the one shown before. A hidden tab's surface is
+// told it is occluded, so its renderer stops drawing frames nobody sees.
+void select_tab(Frame* f, int i) {
+  if (i < 0 || i >= f->ntabs) return;
+  Window* old = f->active >= 0 && f->active < f->ntabs ? f->tabs[f->active]
+                                                        : NULL;
+  Window* w = f->tabs[i];
+  f->active = i;
+  if (old != w) ghostty_surface_set_occlusion(w->surface, true);
+  ShowWindow(w->hwnd, SW_SHOW);
+  if (GetActiveWindow() == f->hwnd) SetFocus(w->hwnd);
+  if (old && old != w) {
+    ShowWindow(old->hwnd, SW_HIDE);
+    ghostty_surface_set_occlusion(old->surface, false);
+  }
+  update_title(f);
+  invalidate_bar(f);
+}
+
+// Take a tab out of its Frame (it closed, or moves to another window).
+void detach_tab(Frame* f, Window* w) {
+  int i = tab_index(f, w);
+  if (i < 0) return;
+  memmove(&f->tabs[i], &f->tabs[i + 1],
+          (size_t)(f->ntabs - i - 1) * sizeof(f->tabs[0]));
+  f->ntabs--;
+  if (f->destroying) return;
+  if (f->ntabs == 0) {
+    f->active = -1;
+    PostMessageW(f->hwnd, WM_GHOSTTY_DESTROY, 0, 0);
+    return;
+  }
+  if (i == f->active) {
+    // The tab that takes its place, or the last one.
+    f->active = -1;
+    layout(f);
+    select_tab(f, i < f->ntabs ? i : f->ntabs - 1);
+  } else {
+    if (i < f->active) f->active--;
+    layout(f);
+  }
+}
+
+bool insert_tab(Frame* f, Window* w, int at) {
+  if (f->ntabs == f->cap) {
+    int cap = f->cap ? f->cap * 2 : 4;
+    Window** p = realloc(f->tabs, (size_t)cap * sizeof(*p));
+    if (!p) return false;
+    f->tabs = p;
+    f->cap = cap;
+  }
+  if (at < 0 || at > f->ntabs) at = f->ntabs;
+  memmove(&f->tabs[at + 1], &f->tabs[at],
+          (size_t)(f->ntabs - at) * sizeof(f->tabs[0]));
+  f->tabs[at] = w;
+  f->ntabs++;
+  if (f->active >= at) f->active++;
+  w->frame = f;
+  return true;
+}
+
+// Give a tab the size of its place in the Frame now (its WM_SIZE may have
+// come before it had a surface).
+void size_tab(Window* w) {
+  RECT rc;
+  GetClientRect(w->hwnd, &rc);
+  if (rc.right > 0 && rc.bottom > 0)
+    ghostty_surface_set_size(w->surface, (uint32_t)rc.right,
+                             (uint32_t)rc.bottom);
+}
+
+// A new tab in f, after the selected one (or at the end), inheriting the
+// working directory and font size of `from` when there is one.
+Window* new_tab(Frame* f, ghostty_surface_t from,
+                       ghostty_surface_context_e context) {
+  Window* w = calloc(1, sizeof(Window));
+  if (!w) return NULL;
+  w->frame = f;
+  w->scale = f->scale;
+  w->hwnd = CreateWindowExW(0, kTerminalClass, L"", WS_CHILD | WS_CLIPSIBLINGS,
+                            0, 0, 0, 0, f->hwnd, NULL, g_inst, NULL);
+  if (!w->hwnd) {
+    free(w);
+    return NULL;
+  }
+  SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
+
+  ghostty_surface_config_s cfg = from ? ghostty_surface_inherited_config(from, context)
+                                      : ghostty_surface_config_new();
+  cfg.platform_tag = GHOSTTY_PLATFORM_WINDOWS;
+  cfg.platform.windows.hwnd = w->hwnd;
+  cfg.userdata = w;
+  cfg.scale_factor = w->scale;
+  cfg.context = context;
+  w->surface = ghostty_surface_new(g_app, &cfg);
+  if (!w->surface || !insert_tab(f, w, g_new_tab_at_end || f->active < 0
+                                           ? f->ntabs
+                                           : f->active + 1)) {
+    fprintf(stderr, "ghostty: could not create the terminal surface\n");
+    if (w->surface) ghostty_surface_free(w->surface);
+    SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, 0);
+    DestroyWindow(w->hwnd);
+    free(w);
+    return NULL;
+  }
+  ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
+  layout(f);
+  size_tab(w);
+  select_tab(f, tab_index(f, w));
+  return w;
+}
+
+// Move the selected tab by `amount`, wrapping around the ends.
+void move_tab(Frame* f, int amount) {
+  int n = f->ntabs, from = f->active;
+  int to = ((from + amount) % n + n) % n;
+  Window* w = f->tabs[from];
+  if (to > from)
+    memmove(&f->tabs[from], &f->tabs[from + 1],
+            (size_t)(to - from) * sizeof(w));
+  else
+    memmove(&f->tabs[to + 1], &f->tabs[to], (size_t)(from - to) * sizeof(w));
+  f->tabs[to] = w;
+  f->active = to;
+  invalidate_bar(f);
+}
+
+// Close a tab as its close button does: Ghostty asks the surface to close
+// and calls close_surface_cb when it does.
+void close_tab(Window* w) { ghostty_surface_request_close(w->surface); }
+
+// ---------------------------------------------------------------------------
+// Window procedures
+
+// A tab: its surface's input and frames.
+LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  Window* w = (Window*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+  if (!w || !w->surface) return DefWindowProcW(hwnd, msg, wp, lp);
+
+  switch (msg) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+      // Let Windows have Alt+F4 and Alt+Space (the window menu); for a
+      // child window DefWindowProc hands them to the top-level window.
+      if (msg == WM_SYSKEYDOWN && (wp == VK_F4 || wp == VK_SPACE)) break;
+      handle_key(w, msg, wp, lp);
+      return 0;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+      handle_key(w, msg, wp, lp);
+      if (msg == WM_SYSKEYUP && wp == VK_MENU) return 0;  // no menu focus
+      break;
+    case WM_CHAR:
+    case WM_SYSCHAR:
+      handle_char(w, (WCHAR)wp);
+      return 0;
+    case WM_DEADCHAR:
+    case WM_SYSDEADCHAR:
+      return 0;
+
+    case WM_MOUSEMOVE:
+      mouse_pos(w, lp);
+      return 0;
+    case WM_LBUTTONDOWN:
+      mouse_button(w, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT);
+      return 0;
+    case WM_LBUTTONUP:
+      mouse_button(w, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT);
+      return 0;
+    case WM_RBUTTONDOWN:
+      mouse_button(w, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT);
+      return 0;
+    case WM_RBUTTONUP:
+      mouse_button(w, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT);
+      return 0;
+    case WM_MBUTTONDOWN:
+      mouse_button(w, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_MIDDLE);
+      return 0;
+    case WM_MBUTTONUP:
+      mouse_button(w, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_MIDDLE);
+      return 0;
+    case WM_MOUSEWHEEL:
+      ghostty_surface_mouse_scroll(
+          w->surface, 0, (double)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA, 0);
+      return 0;
+    case WM_MOUSEHWHEEL:
+      ghostty_surface_mouse_scroll(
+          w->surface, (double)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA, 0, 0);
+      return 0;
+    case WM_SETCURSOR:
+      if (LOWORD(lp) == HTCLIENT) {
+        SetCursor(LoadCursorW(NULL, IDC_IBEAM));
+        return TRUE;
+      }
+      break;
+
+    case WM_SIZE:
+      if (wp != SIZE_MINIMIZED && LOWORD(lp) && HIWORD(lp))
+        ghostty_surface_set_size(w->surface, LOWORD(lp), HIWORD(lp));
+      return 0;
+    case WM_SETFOCUS:
+      ghostty_surface_set_focus(w->surface, true);
+      return 0;
+    case WM_KILLFOCUS:
+      ghostty_surface_set_focus(w->surface, false);
+      return 0;
+
+    case WM_ERASEBKGND:
+      return 1;
+    case WM_PAINT:
+      paint(w);
+      return 0;
+
+    case WM_GHOSTTY_DESTROY:
+      DestroyWindow(hwnd);
+      return 0;
+    case WM_DESTROY: {
+      Frame* f = w->frame;
+      ghostty_surface_free(w->surface);
+      w->surface = NULL;
+      SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+      detach_tab(f, w);
+      free(w->title);
+      free(w->bgra);
+      free(w);
+      return 0;
+    }
+  }
+  return DefWindowProcW(hwnd, msg, wp, lp);
+}
