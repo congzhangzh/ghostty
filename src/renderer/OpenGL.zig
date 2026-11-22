@@ -63,6 +63,11 @@ swap_window: SwapWindow = if (Device.api == .wgl) null else {},
 /// rebinds the context to the window first.
 swap_size: if (Device.api == .wgl) [2]usize else void = if (Device.api == .wgl) .{ 0, 0 } else {},
 
+/// SwapBuffers failures in a row; at `swap_give_up` the surface reads its
+/// frames back from then on.
+swap_failures: if (Device.api == .wgl) u32 else void = if (Device.api == .wgl) 0 else {},
+const swap_give_up = 3;
+
 const SwapWindow = if (Device.api == .wgl) ?gl.wgl.Window else void;
 
 /// GHOSTTY_PRESENT=swap asks for the swap present path (Windows).
@@ -391,7 +396,8 @@ pub fn present(
     // The swap path: the frame goes to the window's back buffer (the
     // target's bytes are sRGB-encoded already, so the blit copies them as
     // they are) and is swapped; the host gets only its size and the cost.
-    if (comptime Device.api == .wgl) if (self.swap_window) |window| {
+    if (comptime Device.api == .wgl) swap: {
+        const window = self.swap_window orelse break :swap;
         const io = global.io();
         const t0: std.Io.Timestamp = .now(io, .awake);
         // A new size: make the context current on the window again. On
@@ -412,7 +418,28 @@ pub fn present(
         const h: gl.c.GLint = @intCast(target.height);
         try gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, .{ .color_buffer_bit = true }, .nearest);
         if (srgb) gl.glad.context.Enable.?(gl.c.GL_FRAMEBUFFER_SRGB);
-        if (!window.swap()) log.warn("SwapBuffers failed", .{});
+        // A failed swap (the window's drawable gone: seen under Wine, where
+        // the window then never updated again): make the context current
+        // on the window again and swap once more. After a few failures in a
+        // row, give up on the window: the context goes back to its hidden
+        // window and this frame and all later ones are read back, so the
+        // host paints them (said once in the log).
+        var swapped = window.swap();
+        if (!swapped) {
+            self.context.rebind(window) catch {};
+            swapped = window.swap();
+        }
+        if (swapped) {
+            self.swap_failures = 0;
+        } else {
+            self.swap_failures += 1;
+            if (self.swap_failures >= swap_give_up) {
+                log.warn("present: SwapBuffers failed {} times in a row, reading frames back from now on", .{self.swap_failures});
+                self.swap_window = null;
+                self.context.makeCurrent() catch |err| log.err("present: no context after giving up swap err={}", .{err});
+                break :swap;
+            }
+        }
         const t1: std.Io.Timestamp = .now(io, .awake);
         return .{ .memory = .{
             .width = @intCast(target.width),
@@ -421,7 +448,7 @@ pub fn present(
             .alloc = self.alloc,
             .readback_ns = @intCast(@max(0, t0.durationTo(t1).nanoseconds)),
         } };
-    };
+    }
 
     // What the readback costs, for the host's stats (Windows): first the
     // wait for the GPU to finish the frame (glReadPixels would wait the
