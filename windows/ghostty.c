@@ -30,6 +30,10 @@
 #include "ghostty.h"
 
 #define WM_GHOSTTY_WAKEUP (WM_APP + 1)
+// Destroy the window later: libghostty asks to close a surface from inside
+// its own call stack, and freeing the surface there would pull it out from
+// under that code.
+#define WM_GHOSTTY_DESTROY (WM_APP + 2)
 
 #ifndef WM_DPICHANGED
 #define WM_DPICHANGED 0x02E0
@@ -55,6 +59,7 @@ typedef struct Window {
 static ghostty_app_t g_app;
 static ghostty_config_t g_config;
 static HWND g_wakeup_hwnd;  // message-only window for wakeups
+static volatile LONG g_wakeup_posted;  // a WM_GHOSTTY_WAKEUP is queued
 static int g_windows;       // open terminal windows
 static const WCHAR* const kTerminalClass = L"GhosttyWindow";
 static const WCHAR* const kWakeupClass = L"GhosttyWakeup";
@@ -377,8 +382,10 @@ static void write_clipboard_cb(void* ud, ghostty_clipboard_e which,
 
 static void wakeup_cb(void* ud) {
   (void)ud;
-  // Any thread: hand the tick to the main thread.
-  PostMessageW(g_wakeup_hwnd, WM_GHOSTTY_WAKEUP, 0, 0);
+  // Any thread: hand the tick to the main thread, one queued message at
+  // a time (one tick handles every wakeup before it).
+  if (InterlockedExchange(&g_wakeup_posted, 1) == 0)
+    PostMessageW(g_wakeup_hwnd, WM_GHOSTTY_WAKEUP, 0, 0);
 }
 
 static Window* target_window(ghostty_target_s t) {
@@ -414,7 +421,7 @@ static bool action_cb(ghostty_app_t app, ghostty_target_s target,
 
     case GHOSTTY_ACTION_CLOSE_WINDOW:
       if (!w) return false;
-      DestroyWindow(w->hwnd);
+      PostMessageW(w->hwnd, WM_GHOSTTY_DESTROY, 0, 0);
       return true;
 
     case GHOSTTY_ACTION_QUIT:
@@ -429,7 +436,7 @@ static bool action_cb(ghostty_app_t app, ghostty_target_s target,
 static void close_surface_cb(void* ud, bool process_alive) {
   (void)process_alive;
   Window* w = ud;
-  if (w && w->hwnd) DestroyWindow(w->hwnd);
+  if (w && w->hwnd) PostMessageW(w->hwnd, WM_GHOSTTY_DESTROY, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +537,9 @@ static LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
       // calls close_surface_cb.
       ghostty_surface_request_close(w->surface);
       return 0;
+    case WM_GHOSTTY_DESTROY:
+      DestroyWindow(hwnd);
+      return 0;
     case WM_DESTROY:
       if (w->surface) ghostty_surface_free(w->surface);
       w->surface = NULL;
@@ -544,10 +554,10 @@ static LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_GHOSTTY_WAKEUP) {
-    // Coalesce: drop wakeups queued behind this one, one tick does them.
-    MSG m;
-    while (PeekMessageW(&m, hwnd, WM_GHOSTTY_WAKEUP, WM_GHOSTTY_WAKEUP, PM_REMOVE)) {
-    }
+    // Clear first: a wakeup during the tick queues the next one. (Not
+    // drained with PeekMessage: that would also take a WM_QUIT, which
+    // every filter lets through.)
+    InterlockedExchange(&g_wakeup_posted, 0);
     ghostty_app_tick(g_app);
     return 0;
   }
