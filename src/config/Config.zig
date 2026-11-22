@@ -6966,31 +6966,35 @@ pub const Keybinds = struct {
                 .{ .performable = true },
             );
 
-            // Resizing splits
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .up, 10 } },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .down, 10 } },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .left, 10 } },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .right, 10 } },
-                .{ .performable = true },
-            );
+            // Resizing splits (on Windows Alt+Shift+arrows instead, set
+            // with F11 below: Win+Ctrl combinations are the shell's,
+            // Win+Ctrl+arrows switch virtual desktops)
+            if (comptime builtin.target.os.tag != .windows) {
+                try self.set.putFlags(
+                    alloc,
+                    .{ .key = .{ .physical = .arrow_up }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
+                    .{ .resize_split = .{ .up, 10 } },
+                    .{ .performable = true },
+                );
+                try self.set.putFlags(
+                    alloc,
+                    .{ .key = .{ .physical = .arrow_down }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
+                    .{ .resize_split = .{ .down, 10 } },
+                    .{ .performable = true },
+                );
+                try self.set.putFlags(
+                    alloc,
+                    .{ .key = .{ .physical = .arrow_left }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
+                    .{ .resize_split = .{ .left, 10 } },
+                    .{ .performable = true },
+                );
+                try self.set.putFlags(
+                    alloc,
+                    .{ .key = .{ .physical = .arrow_right }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
+                    .{ .resize_split = .{ .right, 10 } },
+                    .{ .performable = true },
+                );
+            }
 
             // Viewport scrolling
             try self.set.put(
@@ -7158,6 +7162,50 @@ pub const Keybinds = struct {
                 alloc,
                 .{ .key = .{ .physical = .f11 } },
                 .{ .toggle_fullscreen = {} },
+            );
+
+            // Splits on Windows, where they differ from the defaults above:
+            // resizing with Alt+Shift+arrows, as in Windows' own terminal,
+            // not Win+Ctrl+Shift+arrows (Win+Ctrl combinations are the
+            // shell's; Win+Ctrl+arrows switch virtual desktops). Previous
+            // and next split also on Ctrl+Alt+[ and ] (Ctrl+Win+[ and ]
+            // stay, should the shell let them through); on a layout that
+            // types a character with them (AltGr), the character wins.
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .up, 10 } },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .down, 10 } },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .left, 10 } },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .right, 10 } },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = '[' }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .goto_split = .previous },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = ']' }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .goto_split = .next },
+                .{ .performable = true },
             );
         }
 
