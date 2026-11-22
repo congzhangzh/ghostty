@@ -461,8 +461,18 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       handle_key(w, msg, wp, lp);
       if (msg == WM_SYSKEYUP && wp == VK_MENU) return 0;  // no menu focus
       break;
-    case WM_CHAR:
     case WM_SYSCHAR:
+      if (wp == L' ') {
+        // Alt+Space: the window menu, at the terminal's top left (its key
+        // went to DefWindowProc above; the space must not reach the shell).
+        POINT p = {0, 0};
+        ClientToScreen(hwnd, &p);
+        show_window_menu(w->frame, p.x, p.y);
+        return 0;
+      }
+      handle_char(w, (WCHAR)wp);
+      return 0;
+    case WM_CHAR:
       handle_char(w, (WCHAR)wp);
       return 0;
     case WM_DEADCHAR:
@@ -479,9 +489,16 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       mouse_button(w, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT);
       return 0;
     case WM_RBUTTONDOWN:
+      if (wp & MK_SHIFT) return 0;  // Shift+right-click: the window menu
       mouse_button(w, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT);
       return 0;
     case WM_RBUTTONUP:
+      if (wp & MK_SHIFT) {
+        POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ClientToScreen(hwnd, &p);
+        show_window_menu(w->frame, p.x, p.y);
+        return 0;
+      }
       mouse_button(w, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT);
       return 0;
     case WM_MBUTTONDOWN:
