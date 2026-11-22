@@ -34,7 +34,7 @@ zig cc -target "$arch-windows-gnu" "${opt[@]}" -std=c11 -Wall -Wextra \
 zig c++ -target "$arch-windows-gnu" "${opt[@]}" \
 	"$out/ghostty.obj" \
 	"$prefix/lib/ghostty-internal-static.lib" \
-	-lopengl32 -lgdi32 -luser32 -lshell32 -lole32 -lws2_32 -lmswsock -lntdll \
+	-lopengl32 -lgdi32 -luser32 -lshell32 -lole32 -lws2_32 -lmswsock -lntdll -ldbghelp \
 	"${sub[@]}" \
 	-o "$out/ghostty.exe"
 rm -f "$out/ghostty.obj"

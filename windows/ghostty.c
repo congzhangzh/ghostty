@@ -21,6 +21,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>
+// After windows.h:
+#define PSAPI_VERSION 2
+#include <dbghelp.h>
+#include <psapi.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -98,6 +104,7 @@ static HWND g_wakeup_hwnd;  // message-only window for wakeups
 static volatile LONG g_wakeup_posted;  // a WM_GHOSTTY_WAKEUP is queued
 static Frame* g_frames;     // open windows
 static bool g_debug_keys;   // GHOSTTY_DEBUG_KEYS is set: trace key messages
+static DWORD g_main_tid;    // the thread that runs the message loop
 static TabBarMode g_tab_bar;     // window-show-tab-bar
 static bool g_new_tab_at_end;    // window-new-tab-position = end
 static COLORREF g_bg, g_fg;      // the terminal's colors, for the tab bar
@@ -469,6 +476,245 @@ static bool config_fullscreen(void) {
   const char* key = "fullscreen";
   if (!ghostty_config_get(g_config, &v, key, strlen(key)) || !v) return false;
   return strcmp(v, "false") != 0;
+}
+
+// ---------------------------------------------------------------------------
+// Hang reports
+//
+// A watchdog thread sends the main thread an empty message every second.
+// When it gets no answer for 5 seconds (the point where Windows shows "Not
+// Responding"), it starts this same exe again as
+//   ghostty.exe --windows-hang-report <pid> <main thread id> <file>
+// which suspends each of our threads in turn, walks its stack, and writes
+// the stacks (module+offset) and a small minidump to
+// %LOCALAPPDATA%\ghostty\hangs. Another process does the walking because a
+// thread suspended inside the heap or the loader would deadlock a walker in
+// this one. The report needs no log setup and no tool beside the exe.
+
+static volatile LONG g_loop_done;  // the message loop has ended (quitting)
+
+// %LOCALAPPDATA%\ghostty\hangs, created; false if there is no such folder.
+static bool hangs_dir(WCHAR* out, size_t cap) {
+  WCHAR base[MAX_PATH];
+  DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return false;
+  _snwprintf(out, cap, L"%ls\\ghostty", base);
+  CreateDirectoryW(out, NULL);
+  _snwprintf(out, cap, L"%ls\\ghostty\\hangs", base);
+  CreateDirectoryW(out, NULL);
+  return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void start_hang_report(DWORD seconds) {
+  WCHAR dir[MAX_PATH], file[MAX_PATH], exe[MAX_PATH], cmd[3 * MAX_PATH];
+  if (!hangs_dir(dir, MAX_PATH)) return;
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  _snwprintf(file, MAX_PATH, L"%ls\\hang-%04d%02d%02d-%02d%02d%02d-%lu.txt", dir,
+             t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
+             GetCurrentProcessId());
+  if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return;
+  _snwprintf(cmd, 3 * MAX_PATH, L"\"%ls\" --windows-hang-report %lu %lu \"%ls\"",
+             exe, GetCurrentProcessId(), g_main_tid, file);
+  STARTUPINFOW si = {sizeof(si)};
+  PROCESS_INFORMATION pi;
+  if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL,
+                     NULL, &si, &pi)) {
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  }
+  // Last, and after the report has started: stderr itself may be what
+  // blocks (a pipe nobody reads).
+  char* f8 = utf16_to_utf8(file, -1);
+  fprintf(stderr,
+          "ghostty: the main thread has not answered for %lus%s; stacks: %s\n",
+          seconds, g_loop_done ? " (after the message loop ended)" : "",
+          f8 ? f8 : "?");
+  free(f8);
+}
+
+static DWORD WINAPI watchdog_main(void* arg) {
+  (void)arg;
+  DWORD silent = 0;
+  int reports = 0;
+  for (;;) {
+    Sleep(1000);
+    DWORD_PTR r;
+    if (SendMessageTimeoutW(g_wakeup_hwnd, WM_NULL, 0, 0, SMTO_NORMAL, 1000,
+                            &r)) {
+      silent = 0;
+      continue;
+    }
+    silent += 2;  // the second asleep and the second waited
+    // One report per hang, at most three per run.
+    if (silent >= 5 && silent < 7 && reports < 3) {
+      reports++;
+      start_hang_report(silent);
+    }
+  }
+  return 0;
+}
+
+static void start_watchdog(void) {
+  if (getenv("GHOSTTY_NO_WATCHDOG")) return;
+  HANDLE h = CreateThread(NULL, 0, watchdog_main, NULL, 0, NULL);
+  if (h) CloseHandle(h);
+}
+
+// The report itself, in the second process.
+
+#define HANG_MAX_FRAMES 64
+
+static void hang_frame(FILE* out, HANDLE proc, DWORD64 a) {
+  IMAGEHLP_MODULEW64 mi = {sizeof(mi)};
+  DWORD64 base = 0;
+  WCHAR mod[64] = L"?";
+  if (SymGetModuleInfoW64(proc, a, &mi)) {
+    _snwprintf(mod, 64, L"%ls", mi.ModuleName);
+    base = mi.BaseOfImage;
+  }
+  char buf[sizeof(SYMBOL_INFO) + 256];
+  SYMBOL_INFO* si = (SYMBOL_INFO*)buf;
+  si->SizeOfStruct = sizeof(SYMBOL_INFO);
+  si->MaxNameLen = 255;
+  DWORD64 disp = 0;
+  if (SymFromAddr(proc, a, &disp, si))
+    fprintf(out, "    %ls+0x%llx  %s+0x%llx\n", mod,
+            (unsigned long long)(a - base), si->Name, (unsigned long long)disp);
+  else
+    fprintf(out, "    %ls+0x%llx\n", mod, (unsigned long long)(a - base));
+}
+
+typedef HRESULT(WINAPI* GetThreadDescriptionFn)(HANDLE, PWSTR*);
+
+static int hang_report(DWORD pid, DWORD main_tid, const WCHAR* path) {
+  FILE* out = _wfopen(path, L"w");
+  if (!out) return 1;
+  HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ |
+                                PROCESS_DUP_HANDLE,
+                            FALSE, pid);
+  if (!proc) {
+    fprintf(out, "OpenProcess(%lu): error %lu\n", pid, GetLastError());
+    fclose(out);
+    return 1;
+  }
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  WCHAR exe[MAX_PATH] = L"?";
+  DWORD exe_len = MAX_PATH;
+  QueryFullProcessImageNameW(proc, 0, exe, &exe_len);
+  fprintf(out,
+          "ghostty hang report %04d-%02d-%02d %02d:%02d:%02d\n"
+          "pid %lu, main (UI) thread %lu\nexe %ls\n\n",
+          t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, pid,
+          main_tid, exe);
+
+  SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS |
+                SYMOPT_FAIL_CRITICAL_ERRORS);
+  SymInitializeW(proc, NULL, TRUE);
+
+  // The modules, so an offset can be matched to its build.
+  HMODULE mods[512];
+  DWORD need = 0;
+  if (K32EnumProcessModules(proc, mods, sizeof(mods), &need)) {
+    fprintf(out, "modules:\n");
+    for (DWORD i = 0; i < need / sizeof(HMODULE) && i < 512; i++) {
+      WCHAR name[MAX_PATH];
+      MODULEINFO mi;
+      if (K32GetModuleFileNameExW(proc, mods[i], name, MAX_PATH) &&
+          K32GetModuleInformation(proc, mods[i], &mi, sizeof(mi)))
+        fprintf(out, "  %p %8lx %ls\n", mi.lpBaseOfDll, mi.SizeOfImage, name);
+    }
+    fprintf(out, "\n");
+  }
+
+  GetThreadDescriptionFn describe = (GetThreadDescriptionFn)(void*)GetProcAddress(
+      GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
+
+  for (int s = 0; s < 3; s++) {
+    if (s) Sleep(700);
+    fprintf(out, "=== sample %d\n", s + 1);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te = {sizeof(te)};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+      if (te.th32OwnerProcessID != pid) continue;
+      HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+                                 THREAD_QUERY_INFORMATION,
+                             FALSE, te.th32ThreadID);
+      if (!th) continue;
+      FILETIME c, e, k, u;
+      GetThreadTimes(th, &c, &e, &k, &u);
+      double ks = (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime) / 1e7;
+      double us = (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime) / 1e7;
+      DWORD64 frames[HANG_MAX_FRAMES];
+      int n = 0;
+      if (SuspendThread(th) != (DWORD)-1) {
+        CONTEXT ctx = {0};
+        ctx.ContextFlags = CONTEXT_FULL;
+        if (GetThreadContext(th, &ctx)) {
+          STACKFRAME64 sf = {0};
+          sf.AddrPC.Offset = ctx.Rip;
+          sf.AddrPC.Mode = AddrModeFlat;
+          sf.AddrStack.Offset = ctx.Rsp;
+          sf.AddrStack.Mode = AddrModeFlat;
+          sf.AddrFrame.Offset = ctx.Rbp;
+          sf.AddrFrame.Mode = AddrModeFlat;
+          while (n < HANG_MAX_FRAMES &&
+                 StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, th, &sf, &ctx, NULL,
+                             SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
+            if (!sf.AddrPC.Offset) break;
+            frames[n++] = sf.AddrPC.Offset;
+          }
+        }
+        ResumeThread(th);
+      }
+      PWSTR desc = NULL;
+      if (describe && FAILED(describe(th, &desc))) desc = NULL;
+      fprintf(out, "tid %lu%s%s%ls  kernel %.1fs user %.1fs  frames %d\n",
+              te.th32ThreadID, te.th32ThreadID == main_tid ? " (main)" : "",
+              desc && *desc ? " " : "", desc && *desc ? desc : L"", ks, us, n);
+      if (desc) LocalFree(desc);
+      for (int i = 0; i < n; i++) hang_frame(out, proc, frames[i]);
+      CloseHandle(th);
+    }
+    CloseHandle(snap);
+    fflush(out);
+  }
+
+  // A minidump beside it: every thread's stack memory, for a debugger.
+  WCHAR dmp[MAX_PATH];
+  _snwprintf(dmp, MAX_PATH, L"%ls", path);
+  WCHAR* dot = wcsrchr(dmp, L'.');
+  if (dot) wcscpy(dot, L".dmp");
+  HANDLE f = CreateFileW(dmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+  if (f != INVALID_HANDLE_VALUE) {
+    BOOL ok = MiniDumpWriteDump(
+        proc, pid, f,
+        (MINIDUMP_TYPE)(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                        MiniDumpWithHandleData),
+        NULL, NULL, NULL);
+    CloseHandle(f);
+    fprintf(out, "\nminidump: %ls (%s)\n", dmp, ok ? "written" : "failed");
+  }
+  fclose(out);
+  SymCleanup(proc);
+  CloseHandle(proc);
+  return 0;
+}
+
+// `ghostty.exe --windows-hang-report <pid> <tid> <file>`: true if this run
+// is one (and it has been done).
+static bool hang_report_mode(int* rc) {
+  int argc = 0;
+  WCHAR** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (!argv) return false;
+  bool mine = argc == 5 && wcscmp(argv[1], L"--windows-hang-report") == 0;
+  if (mine)
+    *rc = hang_report((DWORD)wcstoul(argv[2], NULL, 10),
+                      (DWORD)wcstoul(argv[3], NULL, 10), argv[4]);
+  LocalFree(argv);
+  return mine;
 }
 
 // ---------------------------------------------------------------------------
@@ -1267,6 +1513,10 @@ static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int main(int argc, char** argv) {
+  int rc = 0;
+  if (hang_report_mode(&rc)) return rc;
+  g_main_tid = GetCurrentThreadId();
+
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   g_debug_keys = getenv("GHOSTTY_DEBUG_KEYS") != NULL;
 
@@ -1328,13 +1578,26 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  start_watchdog();
   if (!new_window(NULL)) return 1;
+
+  // GHOSTTY_TEST_HANG=<seconds>: block the main thread once, 3 seconds
+  // after start, to prove the watchdog and its report.
+  const char* test_hang = getenv("GHOSTTY_TEST_HANG");
+  if (test_hang) SetTimer(NULL, 0, 3000, NULL);
 
   MSG msg;
   while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+    if (msg.message == WM_TIMER && msg.hwnd == NULL && test_hang) {
+      KillTimer(NULL, msg.wParam);
+      Sleep((DWORD)atoi(test_hang) * 1000);
+      test_hang = NULL;
+      continue;
+    }
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }
+  InterlockedExchange(&g_loop_done, 1);
 
   // Quit (not the last window closing): free the surfaces still open
   // before the app that owns them.
