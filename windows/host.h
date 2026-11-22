@@ -240,6 +240,10 @@ Window* new_tab(Frame* f, ghostty_surface_t from,
 void move_tab(Frame* f, int amount);
 void close_tab(Window* w);
 bool new_split(Window* w, ghostty_action_split_direction_e dir);
+bool goto_split(Window* w, ghostty_action_goto_split_e to);
+bool resize_split(Window* w, ghostty_action_resize_split_s r);
+bool equalize_splits(Window* w);
+bool toggle_split_zoom(Window* w);
 void pane_gone(Frame* f, Window* w);
 void pane_focused(Window* w);
 int tab_panes(Tab* t, Window** out, int cap);

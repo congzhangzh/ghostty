@@ -135,6 +135,15 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       // Beside the pane it came from, in its tab.
       return w && new_split(w, action.action.new_split);
 
+    case GHOSTTY_ACTION_GOTO_SPLIT:
+      return w && goto_split(w, action.action.goto_split);
+    case GHOSTTY_ACTION_RESIZE_SPLIT:
+      return w && resize_split(w, action.action.resize_split);
+    case GHOSTTY_ACTION_EQUALIZE_SPLITS:
+      return w && equalize_splits(w);
+    case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM:
+      return w && toggle_split_zoom(w);
+
     case GHOSTTY_ACTION_NEW_TAB:
       if (!f) f = front_frame();
       if (!f) return new_window(NULL);

@@ -575,6 +575,160 @@ bool new_split(Window* w, ghostty_action_split_direction_e dir) {
   return true;
 }
 
+// The rectangle a node has in the tab (frame client coordinates), found by
+// laying the tree out again in arithmetic: layout_node's rule.
+static bool node_rect(Node* n, RECT r, Node* want, RECT* out) {
+  if (n == want) {
+    *out = r;
+    return true;
+  }
+  if (!n || n->pane) return false;
+  RECT a = r, b = r;
+  if (n->vertical) {
+    int cut = r.top + (int)((r.bottom - r.top - 1) * n->ratio + 0.5);
+    a.bottom = cut;
+    b.top = cut + 1;
+  } else {
+    int cut = r.left + (int)((r.right - r.left - 1) * n->ratio + 0.5);
+    a.right = cut;
+    b.left = cut + 1;
+  }
+  return node_rect(n->a, a, want, out) || node_rect(n->b, b, want, out);
+}
+
+static RECT tab_area(Frame* f) {
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  int b = bar_height(f);
+  RECT area = {0, b, rc.right, rc.bottom > b ? rc.bottom : b};
+  return area;
+}
+
+// Give the keyboard to a pane of the selected tab (unzooming if another one
+// is zoomed).
+static void focus_pane(Window* to) {
+  Frame* f = to->frame;
+  if (to->tab->zoomed && to->tab->zoomed != to) {
+    to->tab->zoomed = NULL;
+    layout(f);
+    show_tab(to, true);
+  }
+  SetFocus(to->hwnd);
+  pane_focused(to);
+}
+
+// Previous/next in tree order (wrapping), or the nearest pane on a side:
+// wholly on that side, overlapping along the other axis; the closest wins,
+// then the one whose middle is nearest. Not performed (false) with one
+// pane or none there, so the key goes on to the terminal.
+bool goto_split(Window* w, ghostty_action_goto_split_e to) {
+  Window* panes[MAX_PANES];
+  int n = tab_panes(w->tab, panes, MAX_PANES);
+  if (n > MAX_PANES) n = MAX_PANES;
+  if (n < 2) return false;
+  int me = 0;
+  while (me < n && panes[me] != w) me++;
+  if (me == n) return false;
+  if (to == GHOSTTY_GOTO_SPLIT_PREVIOUS || to == GHOSTTY_GOTO_SPLIT_NEXT) {
+    int step = to == GHOSTTY_GOTO_SPLIT_NEXT ? 1 : -1;
+    focus_pane(panes[(me + step + n) % n]);
+    return true;
+  }
+  RECT area = tab_area(w->frame), cur, r;
+  node_rect(w->tab->root, area, w->node, &cur);
+  Window* best = NULL;
+  long best_gap = 0, best_mid = 0;
+  for (int i = 0; i < n; i++) {
+    if (i == me || !node_rect(w->tab->root, area, panes[i]->node, &r)) continue;
+    long gap, overlap, mid;
+    switch (to) {
+      case GHOSTTY_GOTO_SPLIT_LEFT: gap = cur.left - r.right; break;
+      case GHOSTTY_GOTO_SPLIT_RIGHT: gap = r.left - cur.right; break;
+      case GHOSTTY_GOTO_SPLIT_UP: gap = cur.top - r.bottom; break;
+      default: gap = r.top - cur.bottom; break;  // down
+    }
+    bool across = to == GHOSTTY_GOTO_SPLIT_LEFT || to == GHOSTTY_GOTO_SPLIT_RIGHT;
+    if (across) {
+      overlap = (r.bottom < cur.bottom ? r.bottom : cur.bottom) -
+                (r.top > cur.top ? r.top : cur.top);
+      mid = labs((r.top + r.bottom) - (cur.top + cur.bottom));
+    } else {
+      overlap = (r.right < cur.right ? r.right : cur.right) -
+                (r.left > cur.left ? r.left : cur.left);
+      mid = labs((r.left + r.right) - (cur.left + cur.right));
+    }
+    if (gap < 0 || overlap <= 0) continue;
+    if (!best || gap < best_gap || (gap == best_gap && mid < best_mid)) {
+      best = panes[i];
+      best_gap = gap;
+      best_mid = mid;
+    }
+  }
+  if (!best) return false;
+  focus_pane(best);
+  return true;
+}
+
+// Move the divider of the nearest split around w that runs the right way,
+// by `amount` pixels toward the direction (kept between 10% and 90%).
+bool resize_split(Window* w, ghostty_action_resize_split_s rs) {
+  bool across = rs.direction == GHOSTTY_RESIZE_SPLIT_LEFT ||
+                rs.direction == GHOSTTY_RESIZE_SPLIT_RIGHT;
+  Node* s = w->node ? w->node->parent : NULL;
+  while (s && s->vertical == across) s = s->parent;
+  if (!s) return false;
+  RECT area = tab_area(w->frame), r;
+  if (!node_rect(w->tab->root, area, s, &r)) return false;
+  int room = (across ? r.right - r.left : r.bottom - r.top) - 1;
+  if (room <= 0) return false;
+  int sign = rs.direction == GHOSTTY_RESIZE_SPLIT_LEFT ||
+                     rs.direction == GHOSTTY_RESIZE_SPLIT_UP
+                 ? -1
+                 : 1;
+  double ratio = s->ratio + sign * (double)rs.amount / room;
+  s->ratio = ratio < 0.1 ? 0.1 : ratio > 0.9 ? 0.9 : ratio;
+  layout(w->frame);
+  return true;
+}
+
+// How many panes a node lines up along a direction: a split that runs
+// that way adds its sides, one across takes the larger side (two panes
+// stacked in a column are one column wide).
+static int weight(Node* n, bool vertical) {
+  if (!n) return 0;
+  if (n->pane) return 1;
+  int a = weight(n->a, vertical), b = weight(n->b, vertical);
+  return n->vertical == vertical ? a + b : (a > b ? a : b);
+}
+
+static void equalize(Node* n) {
+  if (!n || n->pane) return;
+  int a = weight(n->a, n->vertical), b = weight(n->b, n->vertical);
+  n->ratio = (double)a / (a + b);
+  equalize(n->a);
+  equalize(n->b);
+}
+
+// Every split shares its room by how many panes line up on each side.
+bool equalize_splits(Window* w) {
+  if (!w->tab || !w->tab->root || w->tab->root->pane) return false;
+  equalize(w->tab->root);
+  layout(w->frame);
+  return true;
+}
+
+// The focused pane takes the whole tab, or gives it back.
+bool toggle_split_zoom(Window* w) {
+  if (!w->tab || !w->tab->root || w->tab->root->pane) return false;
+  w->tab->zoomed = w->tab->zoomed ? NULL : w;
+  layout(w->frame);
+  if (tab_index(w->frame, w) == w->frame->active) {
+    show_tab(w, true);
+    SetFocus(w->hwnd);
+  }
+  return true;
+}
+
 // A pane closed (its surface went): its leaf leaves the tree, its sibling
 // takes the parent's place, and the tab's focus moves there. The tab's
 // last pane takes the tab with it (detach_tab, as before splits).
