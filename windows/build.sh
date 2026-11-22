@@ -38,6 +38,10 @@ src=$(cd "$here/.." && pwd)
 	git -C "$src" diff --quiet HEAD 2> /dev/null || rev="$rev (modified)"
 	echo "source: $rev $(git -C "$src" rev-parse --abbrev-ref HEAD 2> /dev/null)"
 	echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ), $arch-windows-gnu, host $mode, zig $(zig version)"
+	# A dogfood build may draw into the windows by default (releases read frames back).
+	if [ "${HOST_PRESENT_DEFAULT:-}" = swap ]; then
+		echo "present: swap by default (the renderer draws into the window; GHOSTTY_PRESENT=readback for frames through the CPU)"
+	fi
 	# The core libraries libghostty links on Windows (not the Linux/macOS-only ones, fonts or
 	# themes). `|| true`: some build.zig.zon files have no URL, and under pipefail a failing
 	# grep would end the loop there.
@@ -72,6 +76,7 @@ for c in "$here"/*.c; do
 	zig cc -target "$arch-windows-gnu" "${opt[@]}" -std=c11 -Wall -Wextra \
 		-Wno-unused-parameter -Wno-missing-field-initializers \
 		-DGHOSTTY_STATIC -I"$prefix/include" -DGHOSTTY_HAVE_BUILDINFO_H -I"$out" \
+		${HOST_PRESENT_DEFAULT:+-DGHOSTTY_PRESENT_DEFAULT_$(echo "$HOST_PRESENT_DEFAULT" | tr a-z A-Z)} \
 		-c "$c" -o "$o"
 	objs+=("$o")
 done
