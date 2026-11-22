@@ -39,6 +39,14 @@
 
 #include "ghostty.h"
 
+// What `ghostty.exe /buildinfo` prints: windows/build.sh writes it (with the
+// release kit's own lines first in a release build).
+#ifdef GHOSTTY_HAVE_BUILDINFO_H
+#include "buildinfo.h"
+#else
+#define GHOSTTY_BUILDINFO "build info: not recorded (built without windows/build.sh)\n"
+#endif
+
 #define WM_GHOSTTY_WAKEUP (WM_APP + 1)
 // Destroy the window later: libghostty asks to close a surface from inside
 // its own call stack, and freeing the surface there would pull it out from
@@ -851,6 +859,58 @@ static bool report_mode(int* rc) {
 }
 
 // ---------------------------------------------------------------------------
+// /buildinfo
+
+// Text to where it can be read: stdout when it goes somewhere (a pipe, a
+// file: `ghostty.exe /buildinfo > info.txt`), else the console this was
+// started from (a GUI program has none of its own), else a message box.
+static void print_text(const char* s) {
+  DWORD w;
+  HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN) {
+    WriteFile(h, s, (DWORD)strlen(s), &w, NULL);
+    return;
+  }
+  WCHAR* ws = utf8_to_utf16(s, -1);
+  if (!ws) return;
+  if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+    HANDLE c = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, 0, NULL);
+    if (c != INVALID_HANDLE_VALUE) {
+      WriteConsoleW(c, L"\n", 1, &w, NULL);
+      WriteConsoleW(c, ws, (DWORD)wcslen(ws), &w, NULL);
+      CloseHandle(c);
+      free(ws);
+      return;
+    }
+  }
+  MessageBoxW(NULL, ws, L"Ghostty build info", MB_OK | MB_ICONINFORMATION);
+  free(ws);
+}
+
+static bool buildinfo_mode(int argc, char** argv) {
+  bool asked = false;
+  for (int i = 1; i < argc; i++)
+    if (strcmp(argv[i], "/buildinfo") == 0 || strcmp(argv[i], "--buildinfo") == 0)
+      asked = true;
+  if (!asked) return false;
+  ghostty_info_s gi = ghostty_info();
+  static const char* const modes[] = {"Debug", "ReleaseSafe", "ReleaseFast",
+                                      "ReleaseSmall"};
+  const char* mode = (unsigned)gi.build_mode < 4 ? modes[gi.build_mode] : "?";
+  char text[16384];
+  snprintf(text, sizeof(text),
+           "Ghostty for Windows\n%s"
+           "libghostty: %.*s, %s; renderer OpenGL 4.3 core through WGL, "
+           "frames through the CPU; pty: ConPTY\n"
+           "host: windows/ghostty.c, clang %s\n",
+           GHOSTTY_BUILDINFO, (int)gi.version_len, gi.version, mode,
+           __clang_version__);
+  print_text(text);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Config the host reads
 
 // A config value that is a string (enums come back as their name), or NULL.
@@ -1648,6 +1708,7 @@ static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int main(int argc, char** argv) {
   int rc = 0;
   if (report_mode(&rc)) return rc;
+  if (buildinfo_mode(argc, argv)) return 0;
   g_main_tid = GetCurrentThreadId();
 
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
