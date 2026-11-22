@@ -109,7 +109,7 @@ void notify_toast(Window* w, const char* title, const char* body) {
   int i;
   if (!find_tab(w, &f, &i)) return;
   bool seen = GetForegroundWindow() == f->hwnd && f->active == i;
-  fprintf(stderr, "ghostty: notify: \"%s\" %s\n", title ? title : "",
+  fprintf(stderr, "ghostty: notify: \"%s\" / \"%s\" %s\n", title ? title : "", body ? body : "",
           seen ? "not shown: its tab is the selected tab of the foreground window" : "shown");
   if (seen || !notify_window()) return;
 
@@ -242,9 +242,11 @@ static void apply(Frame* f) {
   if (!tb) return;
   HRESULT hr = tb->lpVtbl->SetProgressState(tb, f->hwnd, flag);
   if (SUCCEEDED(hr) && value >= 0) hr = tb->lpVtbl->SetProgressValue(tb, f->hwnd, (ULONGLONG)value, 100);
-  fprintf(stderr, "ghostty: notify: taskbar progress %s%s%d (HRESULT 0x%08lx)\n",
+  char num[8] = "";
+  if (value >= 0) snprintf(num, sizeof num, " %d", value);
+  fprintf(stderr, "ghostty: notify: taskbar progress %s%s (HRESULT 0x%08lx)\n",
           flag == TBPF_NORMAL ? "normal" : flag == TBPF_ERROR ? "error" : flag == TBPF_PAUSED ? "paused" : flag == TBPF_INDETERMINATE ? "indeterminate" : "none",
-          value >= 0 ? " " : "", value >= 0 ? value : 0, (unsigned long)hr);
+          num, (unsigned long)hr);
 
   if (flag == TBPF_NOPROGRESS) {
     if (s) *s = g_shown[--g_nshown];
