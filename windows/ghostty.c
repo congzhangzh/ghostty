@@ -49,6 +49,13 @@
 #else
 #define GHOSTTY_BUILDINFO "build info: not recorded (built without windows/build.sh)\n"
 #endif
+// Which build runs, for the window title: a release ("20261122.6"), else
+// the source's short commit ("+mod" when built from a changed tree).
+#ifndef GHOSTTY_BUILD_TAG
+#define GHOSTTY_BUILD_TAG "dev"
+#endif
+#define WIDEN2(s) L##s
+#define WIDEN(s) WIDEN2(s)
 
 #define WM_GHOSTTY_WAKEUP (WM_APP + 1)
 // Destroy the window later: libghostty asks to close a surface from inside
@@ -1368,9 +1375,25 @@ static int tab_index(Frame* f, Window* w) {
   return -1;
 }
 
+// The window's title (the taskbar's too): the selected tab's title and
+// which build runs, "<title> \u2014 Ghostty <build>". The tabs show the
+// titles alone.
 static void update_title(Frame* f) {
+  static const WCHAR app[] = L"Ghostty " WIDEN(GHOSTTY_BUILD_TAG);
   Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
-  SetWindowTextW(f->hwnd, w && w->title ? w->title : L"Ghostty");
+  if (!w || !w->title || !*w->title) {
+    SetWindowTextW(f->hwnd, app);
+    return;
+  }
+  size_t n = wcslen(w->title) + wcslen(app) + 4;
+  WCHAR* t = malloc(n * sizeof(WCHAR));
+  if (!t) {
+    SetWindowTextW(f->hwnd, w->title);
+    return;
+  }
+  swprintf(t, n, L"%ls \u2014 %ls", w->title, app);
+  SetWindowTextW(f->hwnd, t);
+  free(t);
 }
 
 // Size every tab to the client area under the tab bar. The hidden ones
