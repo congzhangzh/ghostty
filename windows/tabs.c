@@ -326,6 +326,7 @@ void select_tab(Frame* f, int i) {
   }
   update_title(f);
   invalidate_bar(f);
+  notify_frame_changed(f);
 }
 
 // Take a tab out of its Frame (it closed, or moves to another window).
@@ -547,6 +548,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       ghostty_surface_free(w->surface);
       w->surface = NULL;
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+      notify_tab_closed(w);
       detach_tab(f, w);
       free(w->title);
       free(w->bgra);

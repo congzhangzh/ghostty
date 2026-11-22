@@ -225,6 +225,15 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       MessageBeep(MB_OK);
       return true;
 
+    case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
+      notify_toast(w, action.action.desktop_notification.title,
+                   action.action.desktop_notification.body);
+      return true;
+
+    case GHOSTTY_ACTION_PROGRESS_REPORT:
+      notify_progress(w, action.action.progress_report);
+      return true;
+
     case GHOSTTY_ACTION_CLOSE_WINDOW:
       if (!f) return false;
       PostMessageW(f->hwnd, WM_CLOSE, 0, 0);
