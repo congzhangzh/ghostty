@@ -55,6 +55,14 @@ src=$(cd "$here/.." && pwd)
 	echo '#define GHOSTTY_BUILDINFO \'
 	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/  "/' -e 's/$/\\n" \\/' "$out/BUILDINFO.txt"
 	echo '  ""'
+	# The build in the window title: the release ("release: Ghostty for Windows 20261122.6" →
+	# 20261122.6), else the source's short commit, "+mod" when the tree had changes.
+	tag=$(sed -n 's/^release: Ghostty for Windows //p' "$out/BUILDINFO.txt" | head -1)
+	if [ -z "$tag" ]; then
+		tag=$(sed -n 's/^source: \([0-9a-f]\{9\}\)[0-9a-f]*\( (modified)\)\{0,1\}.*/\1\2/p' "$out/BUILDINFO.txt" | head -1)
+		tag=${tag/ (modified)/+mod}
+	fi
+	echo "#define GHOSTTY_BUILD_TAG \"${tag:-dev}\""
 } > "$out/buildinfo.h"
 
 zig cc -target "$arch-windows-gnu" "${opt[@]}" -std=c11 -Wall -Wextra \
