@@ -101,6 +101,8 @@ typedef struct Window {
   uint64_t key_qpc;        // a key went down, no frame taken since
   uint64_t frame_key_qpc;  // the frame shown now is the first after it
   double latency_ms;       // that key to the end of its frame's paint
+  // Over the last stats period: frames per second, host ms per frame.
+  double fps, swizzle_avg_ms, blit_avg_ms;
 } Window;
 
 // A top-level window: its tabs, the selected one, and the tab bar.
@@ -196,8 +198,14 @@ Window* new_tab(Frame* f, ghostty_surface_t from,
                        ghostty_surface_context_e context);
 void move_tab(Frame* f, int amount);
 void close_tab(Window* w);
-void stats_tick(Frame* f);
+void stats_start(void);
+void stats_tick_all(void);
 void set_stats(Frame* f, bool on);
+void print_text(const char* s);
+bool stats_ipc_on(void);
+void stats_ipc_start(void);
+void stats_ipc_publish(const char* line, size_t len);
+bool stats_client_mode(int argc, char** argv, int* rc);
 WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box);
 void present_stats(Window* w, HDC dc, RECT box, const WCHAR* text);
 Frame* new_frame(void);

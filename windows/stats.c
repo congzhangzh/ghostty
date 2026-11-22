@@ -1,5 +1,7 @@
 #include "host.h"
 
+#include <stdarg.h>
+
 // ---------------------------------------------------------------------------
 // Stats overlay
 //
@@ -28,53 +30,166 @@ static const char* gl_driver(void) {
   return "other (Mesa or Microsoft's)";
 }
 
-void stats_tick(Frame* f) {
+// The numbers are taken for every window every 500 ms on one timer (the
+// wakeup window's), while an overlay shows or the stats pipe is on.
+#define STATS_TIMER 7
+
+static bool g_stats_timer;
+static uint64_t g_stats_qpc, g_stats_start_qpc, g_stats_seq;
+static ULONGLONG g_stats_cpu;  // process CPU time (100 ns) at g_stats_qpc
+static double g_cpu_pct, g_ws_mb, g_private_mb, g_period_ms;
+
+// One window's period: each tab's, and the selected tab's for the overlay.
+static void frame_tick(Frame* f, double dt_ms) {
+  for (int i = 0; i < f->ntabs; i++) {
+    Window* w = f->tabs[i];
+    w->fps = dt_ms > 0 ? w->tick_frames * 1000.0 / dt_ms : 0;
+    w->swizzle_avg_ms = w->tick_frames ? w->tick_swizzle_ms / w->tick_frames : 0;
+    w->blit_avg_ms = w->tick_frames ? w->tick_blit_ms / w->tick_frames : 0;
+    w->tick_frames = 0;
+    w->tick_swizzle_ms = w->tick_blit_ms = 0;
+  }
+  Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
+  f->fps = w ? w->fps : 0;
+  f->swizzle_ms = w ? w->swizzle_avg_ms : 0;
+  f->blit_ms = w ? w->blit_avg_ms : 0;
+  f->cpu_pct = g_cpu_pct;
+  f->ws_mb = g_ws_mb;
+  f->private_mb = g_private_mb;
+  if (f->stats && w) InvalidateRect(w->hwnd, NULL, FALSE);
+}
+
+// A growing string for the pipe's line.
+typedef struct {
+  char* p;
+  size_t len, cap;
+} Line;
+
+static void put(Line* b, const char* fmt, ...) {
+  va_list ap;
+  for (;;) {
+    size_t room = b->cap - b->len;
+    va_start(ap, fmt);
+    int n = b->p ? vsnprintf(b->p + b->len, room, fmt, ap) : -1;
+    va_end(ap);
+    if (b->p && n >= 0 && (size_t)n < room) {
+      b->len += (size_t)n;
+      return;
+    }
+    size_t cap = b->cap ? b->cap * 2 : 2048;
+    if (n >= 0 && cap < b->len + (size_t)n + 1) cap = b->len + (size_t)n + 1;
+    char* q = realloc(b->p, cap);
+    if (!q) return;
+    b->p = q;
+    b->cap = cap;
+  }
+}
+
+// A JSON string: quotes, backslashes and control characters escaped.
+static void put_string(Line* b, const char* s) {
+  put(b, "\"");
+  for (; s && *s; s++) {
+    unsigned char c = (unsigned char)*s;
+    if (c == '"' || c == '\\')
+      put(b, "\\%c", c);
+    else if (c < 0x20)
+      put(b, "\\u%04x", c);
+    else
+      put(b, "%c", c);
+  }
+  put(b, "\"");
+}
+
+static void publish_line(void) {
+  Line b = {0};
+  put(&b,
+      "{\"seq\":%llu,\"t_ms\":%.1f,\"period_ms\":%.1f,\"pid\":%lu,"
+      "\"build\":",
+      (unsigned long long)++g_stats_seq,
+      (double)(g_stats_qpc - g_stats_start_qpc) * g_qpc_ms, g_period_ms,
+      GetCurrentProcessId());
+  put_string(&b, GHOSTTY_BUILD_TAG);
+  put(&b, ",\"cpu_pct\":%.1f,\"ws_mb\":%.1f,\"private_mb\":%.1f,\"gl\":",
+      g_cpu_pct, g_ws_mb, g_private_mb);
+  put_string(&b, gl_driver());
+  put(&b, ",\"windows\":[");
+  int fi = 0;
+  for (Frame* f = g_frames; f; f = f->next, fi++) {
+    put(&b, "%s{\"fullscreen\":%s,\"overlay\":%s,\"tabs\":[", fi ? "," : "",
+        f->fullscreen ? "true" : "false", f->stats ? "true" : "false");
+    for (int i = 0; i < f->ntabs; i++) {
+      Window* w = f->tabs[i];
+      ghostty_surface_size_s sz = ghostty_surface_size(w->surface);
+      char* title = w->title ? utf16_to_utf8(w->title, -1) : NULL;
+      put(&b, "%s{\"selected\":%s,\"title\":", i ? "," : "",
+          i == f->active ? "true" : "false");
+      put_string(&b, title ? title : "");
+      free(title);
+      put(&b,
+          ",\"fps\":%.1f,\"key_ms\":%.1f,\"swizzle_ms\":%.3f,"
+          "\"blit_ms\":%.3f,\"frame\":[%u,%u],\"grid\":[%u,%u],"
+          "\"cell\":[%u,%u]}",
+          w->fps, w->latency_ms, w->swizzle_avg_ms, w->blit_avg_ms, w->frame_w,
+          w->frame_h, sz.columns, sz.rows, sz.cell_width_px, sz.cell_height_px);
+    }
+    put(&b, "]}");
+  }
+  put(&b, "]}");
+  if (b.p) stats_ipc_publish(b.p, b.len);
+  free(b.p);
+}
+
+void stats_tick_all(void) {
   uint64_t now = qpc();
-  double dt_ms = (double)(now - f->stats_qpc) * g_qpc_ms;
+  double dt_ms = (double)(now - g_stats_qpc) * g_qpc_ms;
   FILETIME c, e, k, u;
   ULONGLONG cpu = 0;
   if (GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u))
     cpu = (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime) +
           (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime);
-  if (f->stats_qpc && dt_ms > 0) {
-    // CPU in percent of one core (100 ns units over milliseconds).
-    f->cpu_pct = (double)(cpu - f->stats_cpu) / 1e4 / dt_ms * 100.0;
-    Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
-    if (w) {
-      f->fps = w->tick_frames * 1000.0 / dt_ms;
-      f->swizzle_ms = w->tick_frames ? w->tick_swizzle_ms / w->tick_frames : 0;
-      f->blit_ms = w->tick_frames ? w->tick_blit_ms / w->tick_frames : 0;
-    }
-  }
-  for (int i = 0; i < f->ntabs; i++) {
-    f->tabs[i]->tick_frames = 0;
-    f->tabs[i]->tick_swizzle_ms = f->tabs[i]->tick_blit_ms = 0;
-  }
   PROCESS_MEMORY_COUNTERS_EX m = {sizeof(m)};
   if (K32GetProcessMemoryInfo(GetCurrentProcess(),
                               (PROCESS_MEMORY_COUNTERS*)&m, sizeof(m))) {
-    f->ws_mb = m.WorkingSetSize / 1048576.0;
-    f->private_mb = m.PrivateUsage / 1048576.0;
+    g_ws_mb = m.WorkingSetSize / 1048576.0;
+    g_private_mb = m.PrivateUsage / 1048576.0;
   }
-  f->stats_qpc = now;
-  f->stats_cpu = cpu;
-  if (f->active >= 0) InvalidateRect(f->tabs[f->active]->hwnd, NULL, FALSE);
+  bool baseline = !g_stats_qpc || dt_ms <= 0;
+  // CPU in percent of one core (100 ns units over milliseconds).
+  g_cpu_pct = baseline ? 0 : (double)(cpu - g_stats_cpu) / 1e4 / dt_ms * 100.0;
+  g_period_ms = baseline ? 0 : dt_ms;
+  for (Frame* f = g_frames; f; f = f->next) frame_tick(f, baseline ? 0 : dt_ms);
+  g_stats_qpc = now;
+  g_stats_cpu = cpu;
+  if (!baseline && stats_ipc_on()) publish_line();
+}
+
+// The timer runs while anyone looks: an overlay, or the pipe.
+static void stats_timer_update(void) {
+  bool want = stats_ipc_on();
+  for (Frame* f = g_frames; f && !want; f = f->next) want = f->stats;
+  if (want && !g_stats_timer) {
+    g_stats_qpc = 0;
+    stats_tick_all();  // the baseline
+    g_stats_timer = SetTimer(g_wakeup_hwnd, STATS_TIMER, 500, NULL) != 0;
+  } else if (!want && g_stats_timer) {
+    KillTimer(g_wakeup_hwnd, STATS_TIMER);
+    g_stats_timer = false;
+  }
+}
+
+// At start, once the wakeup window exists: the pipe, and its timer.
+void stats_start(void) {
+  g_stats_start_qpc = qpc();
+  stats_ipc_start();
+  stats_timer_update();
 }
 
 void set_stats(Frame* f, bool on) {
   f->stats = on;
-  if (on) {
-    f->stats_qpc = 0;
-    stats_tick(f);  // the baseline
-    SetTimer(f->hwnd, 7, 500, NULL);
-  } else {
-    KillTimer(f->hwnd, 7);
-  }
+  stats_timer_update();
   if (f->active >= 0) InvalidateRect(f->tabs[f->active]->hwnd, NULL, FALSE);
 }
 
-// The overlay's text (malloc'd) and where its box goes in rc (the top right
-// corner); dc only measures.
 WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box) {
   Frame* f = w->frame;
   UINT dpi = (UINT)(w->scale * 96 + 0.5);

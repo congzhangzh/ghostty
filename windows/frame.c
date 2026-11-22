@@ -136,9 +136,6 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SETFOCUS:
       if (f->active >= 0) SetFocus(f->tabs[f->active]->hwnd);
       return 0;
-    case WM_TIMER:
-      if (wp == 7 && f->stats) stats_tick(f);
-      return 0;
 
     case WM_MOUSEMOVE:
       track_bar_mouse(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
