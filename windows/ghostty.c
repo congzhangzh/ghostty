@@ -65,6 +65,7 @@ static ghostty_config_t g_config;
 static HWND g_wakeup_hwnd;  // message-only window for wakeups
 static volatile LONG g_wakeup_posted;  // a WM_GHOSTTY_WAKEUP is queued
 static int g_windows;       // open terminal windows
+static bool g_debug_keys;   // GHOSTTY_DEBUG_KEYS is set: trace key messages
 static const WCHAR* const kTerminalClass = L"GhosttyWindow";
 static const WCHAR* const kWakeupClass = L"GhosttyWakeup";
 
@@ -184,7 +185,15 @@ static void handle_key(Window* w, UINT msg, WPARAM vk, LPARAM lp) {
     }
   }
   key.text = text;
-  ghostty_surface_key(w->surface, key);
+  bool consumed = ghostty_surface_key(w->surface, key);
+  // GHOSTTY_DEBUG_KEYS=1: one line per key message on stderr, to debug a
+  // layout, AltGr or IME report (start it from cmd.exe: 2> keys.log).
+  if (g_debug_keys)
+    fprintf(stderr,
+            "key msg=0x%04x vk=0x%02x scan=0x%04x mods=0x%x action=%d "
+            "text=%s consumed=%d\n",
+            msg, (unsigned)vk, key.keycode, (unsigned)key.mods,
+            (int)key.action, text ? text : "", consumed);
   free(text);
 }
 
@@ -655,6 +664,7 @@ static bool new_window(HINSTANCE inst) {
 
 int main(int argc, char** argv) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  g_debug_keys = getenv("GHOSTTY_DEBUG_KEYS") != NULL;
 
   if (ghostty_init((uintptr_t)argc, argv) != GHOSTTY_SUCCESS) {
     fprintf(stderr, "ghostty: ghostty_init failed\n");
