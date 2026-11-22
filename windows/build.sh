@@ -65,17 +65,23 @@ src=$(cd "$here/.." && pwd)
 	echo "#define GHOSTTY_BUILD_TAG \"${tag:-dev}\""
 } > "$out/buildinfo.h"
 
-zig cc -target "$arch-windows-gnu" "${opt[@]}" -std=c11 -Wall -Wextra \
-	-Wno-unused-parameter -Wno-missing-field-initializers \
-	-DGHOSTTY_STATIC -I"$prefix/include" -DGHOSTTY_HAVE_BUILDINFO_H -I"$out" \
-	-c "$here/ghostty.c" -o "$out/ghostty.obj"
+# The host's modules (windows/*.c, sharing windows/host.h), one object each.
+objs=()
+for c in "$here"/*.c; do
+	o=$out/$(basename "$c" .c).obj
+	zig cc -target "$arch-windows-gnu" "${opt[@]}" -std=c11 -Wall -Wextra \
+		-Wno-unused-parameter -Wno-missing-field-initializers \
+		-DGHOSTTY_STATIC -I"$prefix/include" -DGHOSTTY_HAVE_BUILDINFO_H -I"$out" \
+		-c "$c" -o "$o"
+	objs+=("$o")
+done
 # The static library has C++ in it (glslang, spirv-cross, dear imgui), so
 # the link is a C++ link: zig c++ brings libc++.
 zig c++ -target "$arch-windows-gnu" "${opt[@]}" \
-	"$out/ghostty.obj" \
+	"${objs[@]}" \
 	"$prefix/lib/ghostty-internal-static.lib" \
 	-lopengl32 -lgdi32 -luser32 -lshell32 -lole32 -lws2_32 -lmswsock -lntdll -ldbghelp \
 	"${sub[@]}" \
 	-o "$out/ghostty.exe"
-rm -f "$out/ghostty.obj"
+rm -f "${objs[@]}"
 echo "built $out/ghostty.exe (build info: $out/BUILDINFO.txt)"
