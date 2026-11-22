@@ -690,18 +690,33 @@ static void report_frame(FILE* out, HANDLE proc, DWORD64 a) {
     fprintf(out, "    %ls+0x%llx\n", mod, (unsigned long long)(a - base));
 }
 
-// Walk a stack from `ctx` (a copy: StackWalk64 changes it).
+// Walk a stack from `ctx` (a copy: StackWalk64 changes it). The CONTEXT
+// and the machine are this build's own: the helper reads its own exe's
+// threads.
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define WALK_MACHINE IMAGE_FILE_MACHINE_ARM64
+#define WALK_PC(c) (c).Pc
+#define WALK_SP(c) (c).Sp
+#define WALK_FP(c) (c).Fp
+#elif defined(__x86_64__) || defined(_M_X64)
+#define WALK_MACHINE IMAGE_FILE_MACHINE_AMD64
+#define WALK_PC(c) (c).Rip
+#define WALK_SP(c) (c).Rsp
+#define WALK_FP(c) (c).Rbp
+#else
+#error "stack walk: x86_64 or aarch64 only"
+#endif
 static int walk(HANDLE proc, HANDLE th, CONTEXT ctx, DWORD64* frames) {
   STACKFRAME64 sf = {0};
-  sf.AddrPC.Offset = ctx.Rip;
+  sf.AddrPC.Offset = WALK_PC(ctx);
   sf.AddrPC.Mode = AddrModeFlat;
-  sf.AddrStack.Offset = ctx.Rsp;
+  sf.AddrStack.Offset = WALK_SP(ctx);
   sf.AddrStack.Mode = AddrModeFlat;
-  sf.AddrFrame.Offset = ctx.Rbp;
+  sf.AddrFrame.Offset = WALK_FP(ctx);
   sf.AddrFrame.Mode = AddrModeFlat;
   int n = 0;
   while (n < REPORT_MAX_FRAMES &&
-         StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, th, &sf, &ctx, NULL,
+         StackWalk64(WALK_MACHINE, proc, th, &sf, &ctx, NULL,
                      SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
     if (!sf.AddrPC.Offset) break;
     frames[n++] = sf.AddrPC.Offset;
