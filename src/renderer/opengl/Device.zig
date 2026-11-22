@@ -4,16 +4,24 @@
 //! contexts, each corresponding to a surface, its renderer
 //! object and its render thread.
 //!
+//! On Windows there is no EGL: each surface creates its own WGL
+//! context (see `pkg/opengl/wgl.zig`), so the device holds nothing.
+//!
 //! TODO: If there's a way to prefer certain devices like in
 //! Vulkan or Metal we should do it here.
 const Device = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const gl = @import("opengl");
 const egl = gl.egl;
 
 const log = std.log.scoped(.opengl);
+
+/// How OpenGL contexts are created on this target.
+pub const Api = enum { egl, wgl };
+pub const api: Api = if (builtin.target.os.tag == .windows) .wgl else .egl;
 
 /// Options used when creating the OpenGL device.
 pub const Options = struct {
@@ -28,15 +36,20 @@ pub const Options = struct {
 /// The lifecycle of this display is always managed externally, both in the
 /// cases where we were given a display as a config option, or we use the
 /// systemwide default display that is cleaned up by the OS.
-display: *egl.Display,
+display: if (api == .egl) *egl.Display else void,
 
 /// The EGL config used to create surface renderer contexts. Chosen
 /// once here so that all contexts share compatible capabilities.
-config: *egl.Config,
+config: if (api == .egl) *egl.Config else void,
 
 pub fn init(alloc: Allocator, options: Options) !*Device {
     const self = try alloc.create(Device);
     errdefer alloc.destroy(self);
+
+    if (comptime api == .wgl) {
+        self.* = .{ .display = {}, .config = {} };
+        return self;
+    }
 
     try egl.load();
 

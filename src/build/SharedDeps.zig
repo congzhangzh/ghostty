@@ -224,14 +224,22 @@ pub fn add(
     // POSIX C imports that are used throughout Ghostty on a general basis.
     // (note: errno is C stdlib but we just include it here because that's
     // where it's generally included otherwise)
+    // Windows (mingw) has no pwd.h; nothing calls getpwuid there
+    // (os/passwd.zig does not import this module on Windows).
+    const posix_headers: []const translate_c.Options.IncludeFile = if (target.result.os.tag == .windows) &.{
+        .{ .path = "errno.h" },
+        .{ .path = "signal.h" },
+        .{ .path = "sys/types.h" },
+        .{ .path = "unistd.h" },
+    } else &.{
+        .{ .path = "errno.h" },
+        .{ .path = "pwd.h" },
+        .{ .path = "signal.h" },
+        .{ .path = "sys/types.h" },
+        .{ .path = "unistd.h" },
+    };
     try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
-        .source = .{ .includes = .{ .files = &.{
-            .{ .path = "errno.h" },
-            .{ .path = "pwd.h" },
-            .{ .path = "signal.h" },
-            .{ .path = "sys/types.h" },
-            .{ .path = "unistd.h" },
-        } } },
+        .source = .{ .includes = .{ .files = posix_headers } },
         .target = target,
         .optimize = optimize,
     });
@@ -516,7 +524,12 @@ pub fn add(
     }
 
     // Other dependencies, mostly pure Zig
-    if (b.lazyDependency("opengl", .{})) |dep| {
+    // The target matters: glad's headers are translated for it, and on
+    // Windows (LLP64) GLsizeiptr is `long long`, not the host's `long`.
+    if (b.lazyDependency("opengl", .{
+        .target = target,
+        .optimize = optimize,
+    })) |dep| {
         step.root_module.addImport("opengl", dep.module("opengl"));
     }
     if (b.lazyDependency("vaxis", .{
@@ -659,6 +672,22 @@ pub fn add(
                 .{ .root_source_file = nf_symbols.path("SymbolsNerdFont-Regular.ttf") },
             );
         }
+    }
+
+    // Windows renders with OpenGL through WGL (pkg/opengl/wgl.zig) and
+    // its hosts link libghostty, so the library needs glad too (an exe
+    // or a test gets it below) and the system DLLs WGL lives in.
+    if (target.result.os.tag == .windows and self.config.renderer == .opengl) {
+        if (step.kind == .lib) {
+            step.root_module.addIncludePath(b.path("vendor/glad/include/"));
+            step.root_module.addCSourceFile(.{
+                .file = b.path("vendor/glad/src/gl.c"),
+                .flags = &.{},
+            });
+        }
+        step.root_module.linkSystemLibrary("opengl32", dynamic_link_opts);
+        step.root_module.linkSystemLibrary("gdi32", dynamic_link_opts);
+        step.root_module.linkSystemLibrary("user32", dynamic_link_opts);
     }
 
     // If we're building an exe then we have additional dependencies.
