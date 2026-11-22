@@ -55,13 +55,30 @@ static bool is_dark(COLORREF c) {
          128;
 }
 
+// In the title bar a tab is at most 240 points wide, as in Chrome: with few
+// tabs the + follows the last one, and the rest of the bar is the caption
+// (drag it), with room for the motto. Elsewhere the tabs share the width.
+static int tab_cap(Frame* f, int width, int b) {
+  int area = bar_end(f, width) - b;  // the + button is b wide
+  if (!titlebar_active(f) || f->ntabs <= 0) return 0;
+  int cap = px(f, 240);
+  return area / f->ntabs > cap ? cap : 0;
+}
+
 static void tab_rect(Frame* f, int width, int b, int i, RECT* r) {
   int area = bar_end(f, width) - b;  // the + button is b wide
   if (area < 0) area = 0;
-  r->left = (int)((long long)area * i / f->ntabs);
-  r->right = (int)((long long)area * (i + 1) / f->ntabs);
+  int cap = tab_cap(f, width, b);
+  r->left = cap ? cap * i : (int)((long long)area * i / f->ntabs);
+  r->right = cap ? cap * (i + 1) : (int)((long long)area * (i + 1) / f->ntabs);
   r->top = 0;
   r->bottom = b;
+}
+
+// Where the + starts: after the last tab.
+static int plus_x(Frame* f, int width, int b) {
+  int cap = tab_cap(f, width, b);
+  return cap ? cap * f->ntabs : bar_end(f, width) - b;
 }
 
 static void close_rect(Frame* f, const RECT* tab, RECT* r) {
@@ -78,8 +95,10 @@ BarHit bar_hit(Frame* f, int x, int y, int* index) {
   int b = bar_height(f);
   *index = -1;
   int end = bar_end(f, rc.right);
+  int xp = plus_x(f, rc.right, b);
   if (b == 0 || y < 0 || y >= b || x < 0 || x >= end) return HIT_NONE;
-  if (x >= end - b) return HIT_PLUS;
+  if (x >= xp + b) return HIT_NONE;  // after the +: the caption
+  if (x >= xp) return HIT_PLUS;
   for (int i = 0; i < f->ntabs; i++) {
     RECT t, c;
     tab_rect(f, rc.right, b, i, &t);
@@ -179,12 +198,25 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
   // The new-tab button, at the end of the tabs; then the bar's edge goes
   // on under the gap and Windows' buttons.
   int end = bar_end(f, width);
-  int xp = end - b;
-  if (f->hover_plus) fill(dc, xp, 0, end, b, hover);
+  int xp = plus_x(f, width, b);
+  if (f->hover_plus) fill(dc, xp, 0, xp + b, b, hover);
   fill(dc, xp, b - 1, width, b, line);
   int cx = xp + b / 2, cy = b / 2, h = px(f, 6);
   stroke(dc, cx - h, cy, cx + h + 1, cy, lw, dim);
   stroke(dc, cx, cy - h, cx, cy + h + 1, lw, dim);
+
+  // Ghostty's motto in the caption's empty part, dim, only when it fits
+  // whole (the tabs come first). GHOSTTY_SLOGAN=false turns it off.
+  if (titlebar_active(f) && slogan_shown()) {
+    RECT m = {xp + b + px(f, 16), 0, end, b};
+    RECT need = {0, 0, 0, 0};
+    DrawTextW(dc, kMotto, -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    if (need.right <= m.right - m.left) {
+      SetTextColor(dc, mix(dim, bar, 0.35));
+      DrawTextW(dc, kMotto, -1, &m,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+  }
 }
 
 void paint_frame(Frame* f) {

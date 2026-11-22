@@ -157,6 +157,7 @@ Frame* new_frame(void) {
   }
   f->scale = window_scale(f->hwnd);
   SetWindowLongPtrW(f->hwnd, GWLP_USERDATA, (LONG_PTR)f);
+  about_menu_add(f->hwnd);  // About and What's new in the window menu
   if (g_titlebar_tabs)  // WM_NCCALCSIZE again, now that frame_proc knows f
     SetWindowPos(f->hwnd, NULL, 0, 0, 0, 0,
                  SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
@@ -235,6 +236,9 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     case WM_NCHITTEST:
       if (titlebar_active(f)) return titlebar_hit(f, wp, lp);
+      break;
+    case WM_SYSCOMMAND:
+      if (about_command(hwnd, wp)) return 0;
       break;
     case WM_NCLBUTTONDBLCLK:
       // The bar's caption, double-clicked: maximize or restore, here and
