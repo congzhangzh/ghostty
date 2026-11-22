@@ -22,7 +22,7 @@ static const WCHAR* const kWakeupClass = L"GhosttyWakeup";
 // Text to where it can be read: stdout when it goes somewhere (a pipe, a
 // file: `ghostty.exe /buildinfo > info.txt`), else the console this was
 // started from (a GUI program has none of its own), else a message box.
-static void print_text(const char* s) {
+void print_text(const char* s) {
   DWORD w;
   HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
   if (h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN) {
@@ -97,6 +97,10 @@ static void read_host_config(void) {
 }
 
 static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (msg == WM_TIMER && wp == 7) {  // the stats period (stats.c)
+    stats_tick_all();
+    return 0;
+  }
   if (msg == WM_GHOSTTY_WAKEUP) {
     // Clear first: a wakeup during the tick queues the next one. (Not
     // drained with PeekMessage: that would also take a WM_QUIT, which
@@ -112,6 +116,7 @@ int main(int argc, char** argv) {
   int rc = 0;
   if (report_mode(&rc)) return rc;
   if (buildinfo_mode(argc, argv)) return 0;
+  if (stats_client_mode(argc, argv, &rc)) return rc;
   stderr_guard_start();
   g_main_tid = GetCurrentThreadId();
   LARGE_INTEGER freq;
@@ -180,6 +185,7 @@ int main(int argc, char** argv) {
   }
 
   start_reports();
+  stats_start();
   if (!new_window(NULL)) return 1;
 
   // To prove the reports, 3 seconds after start: GHOSTTY_TEST_HANG=<seconds>
