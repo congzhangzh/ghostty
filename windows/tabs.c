@@ -8,13 +8,40 @@
 // and the others are darker; tabs share the width equally, the title is
 // centered, a tab under the mouse shows its close button on the left, and
 // the + at the right end opens a new tab.
+//
+// On Windows 11 the bar is the title bar, as in Chrome, to give the
+// terminal the row a separate bar would take: the client area takes the
+// caption's place (WM_NCCALCSIZE), DWM's frame reaches down over it
+// (DwmExtendFrameIntoClientArea) so Windows still draws its own minimize,
+// maximize and close buttons there (snap layouts, hover, dark mode,
+// accessibility: DwmDefWindowProc answers for them), and the bar keeps
+// their place clear. The rest of the bar that is not a tab or the + is the
+// caption: drag it to move the window, double-click to maximize; a tab
+// dragged moves the window too. GHOSTTY_TITLEBAR=tabs|system chooses.
 
 static int px(Frame* f, double points) { return (int)(points * f->scale + 0.5); }
 
-static int bar_height(Frame* f) {
+bool g_titlebar_tabs;
+
+bool titlebar_active(Frame* f) { return g_titlebar_tabs && !f->fullscreen; }
+
+int bar_height(Frame* f) {
+  // In the title bar: as tall as Windows' caption buttons (the caption at
+  // this monitor's DPI), at least the bar's own height.
+  if (titlebar_active(f))
+    return f->buttons_h > px(f, 30) ? f->buttons_h : px(f, 30);
   bool show = g_tab_bar == TAB_BAR_ALWAYS ||
               (g_tab_bar == TAB_BAR_AUTO && f->ntabs > 1);
   return show ? px(f, 30) : 0;
+}
+
+// Where the tabs and the + go, [0, end): in the title bar, Windows'
+// buttons keep their place on the right, and a gap before them is left to
+// drag the window by.
+static int bar_end(Frame* f, int width) {
+  if (!titlebar_active(f)) return width;
+  int end = width - f->buttons_w - px(f, 40);
+  return end > 0 ? end : 0;
 }
 
 static COLORREF mix(COLORREF a, COLORREF b, double t) {
@@ -29,7 +56,7 @@ static bool is_dark(COLORREF c) {
 }
 
 static void tab_rect(Frame* f, int width, int b, int i, RECT* r) {
-  int area = width - b;  // the + button is b wide
+  int area = bar_end(f, width) - b;  // the + button is b wide
   if (area < 0) area = 0;
   r->left = (int)((long long)area * i / f->ntabs);
   r->right = (int)((long long)area * (i + 1) / f->ntabs);
@@ -50,8 +77,9 @@ BarHit bar_hit(Frame* f, int x, int y, int* index) {
   GetClientRect(f->hwnd, &rc);
   int b = bar_height(f);
   *index = -1;
-  if (b == 0 || y < 0 || y >= b || x < 0 || x >= rc.right) return HIT_NONE;
-  if (x >= rc.right - b) return HIT_PLUS;
+  int end = bar_end(f, rc.right);
+  if (b == 0 || y < 0 || y >= b || x < 0 || x >= end) return HIT_NONE;
+  if (x >= end - b) return HIT_PLUS;
   for (int i = 0; i < f->ntabs; i++) {
     RECT t, c;
     tab_rect(f, rc.right, b, i, &t);
@@ -99,9 +127,14 @@ static void stroke(HDC dc, int x0, int y0, int x1, int y1, int width,
   DeleteObject(pen);
 }
 
+COLORREF bar_color(void) {
+  return mix(g_bg, RGB(0, 0, 0), is_dark(g_bg) ? 0.35 : 0.10);
+}
+
+bool bar_is_dark(void) { return is_dark(bar_color()); }
+
 static void draw_bar(Frame* f, HDC dc, int width, int b) {
-  bool dark = is_dark(g_bg);
-  COLORREF bar = mix(g_bg, RGB(0, 0, 0), dark ? 0.35 : 0.10);
+  COLORREF bar = bar_color();
   COLORREF hover = mix(bar, g_bg, 0.5);
   COLORREF line = mix(bar, g_fg, 0.12);
   COLORREF dim = mix(g_fg, bar, 0.45);
@@ -143,11 +176,13 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
     }
   }
 
-  // The new-tab button.
-  int x0 = width - b;
-  if (f->hover_plus) fill(dc, x0, 0, width, b, hover);
-  fill(dc, x0, b - 1, width, b, line);
-  int cx = x0 + b / 2, cy = b / 2, h = px(f, 6);
+  // The new-tab button, at the end of the tabs; then the bar's edge goes
+  // on under the gap and Windows' buttons.
+  int end = bar_end(f, width);
+  int xp = end - b;
+  if (f->hover_plus) fill(dc, xp, 0, end, b, hover);
+  fill(dc, xp, b - 1, width, b, line);
+  int cx = xp + b / 2, cy = b / 2, h = px(f, 6);
   stroke(dc, cx - h, cy, cx + h + 1, cy, lw, dim);
   stroke(dc, cx, cy - h, cx, cy + h + 1, lw, dim);
 }
@@ -159,11 +194,29 @@ void paint_frame(Frame* f) {
   GetClientRect(f->hwnd, &rc);
   int b = bar_height(f);
   if (b > 0 && rc.right > 0) {
-    // Draw off screen, then copy: no flicker while the mouse moves.
+    // Draw off screen, then copy: no flicker while the mouse moves. A
+    // 32-bit DIB, because in the title bar DWM reads its alpha: GDI leaves
+    // alpha 0 (see-through to DWM's frame), so it is set to 255 for the bar,
+    // and Windows' buttons' place is left clear (0) for DWM to draw them.
+    BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), rc.right, -b, 1, 32, BI_RGB}};
+    uint32_t* pixels = NULL;
+    HBITMAP bmp =
+        CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void**)&pixels, NULL, 0);
+    if (!bmp) {
+      EndPaint(f->hwnd, &ps);
+      return;
+    }
     HDC mem = CreateCompatibleDC(dc);
-    HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, b);
     HGDIOBJ old = SelectObject(mem, bmp);
     draw_bar(f, mem, rc.right, b);
+    GdiFlush();
+    int c0 = rc.right, c1 = rc.right;  // the buttons' columns
+    if (titlebar_active(f) && f->buttons_w > 0) c0 = rc.right - f->buttons_w;
+    for (int y = 0; y < b; y++)
+      for (int x = 0; x < rc.right; x++) {
+        uint32_t* p = &pixels[(size_t)y * rc.right + x];
+        *p = x >= c0 && x < c1 ? 0 : (*p | 0xff000000u);
+      }
     BitBlt(dc, 0, 0, rc.right, b, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old);
     DeleteObject(bmp);
@@ -215,6 +268,7 @@ void layout(Frame* f) {
   RECT rc;
   GetClientRect(f->hwnd, &rc);
   if (rc.right <= 0 || rc.bottom <= 0) return;  // minimized
+  titlebar_update(f);  // the caption buttons, DWM's frame over the bar
   int b = bar_height(f);
   int h = rc.bottom > b ? rc.bottom - b : 0;
   for (int i = 0; i < f->ntabs; i++)

@@ -17,19 +17,112 @@ void set_fullscreen(Frame* w, bool on) {
         !GetMonitorInfoW(MonitorFromWindow(w->hwnd, MONITOR_DEFAULTTONEAREST),
                          &mi))
       return;
+    // First: WM_NCCALCSIZE during the change asks titlebar_active.
+    w->fullscreen = true;
     SetWindowLongW(w->hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
     SetWindowPos(w->hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                  mi.rcMonitor.right - mi.rcMonitor.left,
                  mi.rcMonitor.bottom - mi.rcMonitor.top,
                  SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
   } else {
+    w->fullscreen = false;
     SetWindowLongW(w->hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
     SetWindowPlacement(w->hwnd, &w->placement);
     SetWindowPos(w->hwnd, NULL, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
                      SWP_FRAMECHANGED);
   }
-  w->fullscreen = on;
+  layout(w);  // the bar: the title bar again, or the full screen one
+}
+
+// ---------------------------------------------------------------------------
+// Tabs in the title bar (the bar itself is drawn in tabs.c)
+
+// The resize border's height: also how far a maximized window reaches
+// past its monitor's top.
+int frame_border_y(HWND hwnd) {
+  UINT dpi = GetDpiForWindow(hwnd);
+  return GetSystemMetricsForDpi(SM_CYFRAME, dpi) +
+         GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+LRESULT titlebar_hit(Frame* f, WPARAM wp, LPARAM lp) {
+  // The side and bottom borders are still the system's.
+  LRESULT r = DefWindowProcW(f->hwnd, WM_NCHITTEST, wp, lp);
+  if (r != HTCLIENT) return r;
+  POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+  ScreenToClient(f->hwnd, &p);
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  int i, edge = frame_border_y(f->hwnd);
+  // The top edge resizes, over the tabs too.
+  if (p.y >= 0 && p.y < edge && !IsZoomed(f->hwnd))
+    return p.x < edge ? HTTOPLEFT : p.x >= rc.right - edge ? HTTOPRIGHT : HTTOP;
+  BarHit hit = bar_hit(f, p.x, p.y, &i);
+  // In the bar, what is not a tab or the + is the caption.
+  if (hit == HIT_NONE && p.y >= 0 && p.y < bar_height(f)) return HTCAPTION;
+  return HTCLIENT;
+}
+
+// Is this Windows 11 (build 22000) or later.
+static bool windows_11(void) {
+  typedef LONG(WINAPI * GetVersionFn)(OSVERSIONINFOW*);
+  GetVersionFn get = (GetVersionFn)(void*)GetProcAddress(
+      GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+  OSVERSIONINFOW v = {sizeof(v)};
+  return get && get(&v) == 0 && v.dwBuildNumber >= 22000;
+}
+
+// Where DWM puts the caption buttons, in client pixels.
+static void update_buttons(Frame* f) {
+  f->buttons_w = f->buttons_h = 0;
+  if (!titlebar_active(f)) return;
+  RECT bb, wr, rc;
+  POINT o = {0, 0};
+  GetWindowRect(f->hwnd, &wr);
+  GetClientRect(f->hwnd, &rc);
+  ClientToScreen(f->hwnd, &o);
+  if (SUCCEEDED(DwmGetWindowAttribute(f->hwnd, DWMWA_CAPTION_BUTTON_BOUNDS,
+                                      &bb, sizeof(bb))) &&
+      bb.right > bb.left) {
+    // Window-relative: from the window rect's corner.
+    int ox = o.x - wr.left, oy = o.y - wr.top;
+    f->buttons_w = rc.right - (bb.left - ox);
+    f->buttons_h = bb.bottom - oy;
+  } else {
+    // No DWM (Wine): keep the usual room, for the same layout.
+    f->buttons_w = (int)(3 * 46 * f->scale + 0.5);
+  }
+  if (f->buttons_w < 0) f->buttons_w = 0;
+  if (f->buttons_h < 0) f->buttons_h = 0;
+}
+
+// Before each layout: where the buttons are, DWM's frame over the bar
+// (none in full screen), and the buttons' background in the bar's color,
+// their glyphs light or dark to match.
+void titlebar_update(Frame* f) {
+  if (!g_titlebar_tabs) return;
+  update_buttons(f);
+  MARGINS m = {0, 0, titlebar_active(f) ? bar_height(f) : 0, 0};
+  DwmExtendFrameIntoClientArea(f->hwnd, &m);
+  COLORREF bar = bar_color();
+  DwmSetWindowAttribute(f->hwnd, DWMWA_CAPTION_COLOR, &bar, sizeof(bar));
+  BOOL dark = bar_is_dark();
+  DwmSetWindowAttribute(f->hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
+                        sizeof(dark));
+}
+
+void titlebar_choose(void) {
+  const char* v = getenv("GHOSTTY_TITLEBAR");
+  BOOL composition = FALSE;
+  if (v && strcmp(v, "tabs") == 0)
+    g_titlebar_tabs = true;
+  else if (v && strcmp(v, "system") == 0)
+    g_titlebar_tabs = false;
+  else
+    g_titlebar_tabs = g_tab_bar != TAB_BAR_NEVER && windows_11() &&
+                      SUCCEEDED(DwmIsCompositionEnabled(&composition)) &&
+                      composition;
 }
 
 // The config's `fullscreen` (false, true, or a macOS-only variant, all
@@ -64,6 +157,10 @@ Frame* new_frame(void) {
   }
   f->scale = window_scale(f->hwnd);
   SetWindowLongPtrW(f->hwnd, GWLP_USERDATA, (LONG_PTR)f);
+  if (g_titlebar_tabs)  // WM_NCCALCSIZE again, now that frame_proc knows f
+    SetWindowPos(f->hwnd, NULL, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE);
   f->next = g_frames;
   g_frames = f;
   return f;
@@ -105,7 +202,7 @@ static void track_bar_mouse(Frame* f, int x, int y) {
     f->hover_plus = plus;
     invalidate_bar(f);
   }
-  if (!f->tracking && hit != HIT_NONE) {
+  if (!f->tracking) {
     TRACKMOUSEEVENT t = {sizeof(t), TME_LEAVE, f->hwnd, 0};
     f->tracking = TrackMouseEvent(&t);
   }
@@ -116,7 +213,41 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   Frame* f = (Frame*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
   if (!f) return DefWindowProcW(hwnd, msg, wp, lp);
 
+  if (titlebar_active(f)) {
+    // Windows' caption buttons, drawn by DWM in the bar: DWM answers for
+    // them (hover, presses, snap layouts).
+    LRESULT r;
+    if (DwmDefWindowProc(hwnd, msg, wp, lp, &r)) return r;
+  }
+
   switch (msg) {
+    case WM_NCCALCSIZE:
+      if (wp && titlebar_active(f)) {
+        // The system's borders on the sides and bottom; at the top, the
+        // client area from the window's own top (a maximized window's top
+        // is past its monitor's by the border: skip that much).
+        NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
+        LONG top = p->rgrc[0].top;
+        DefWindowProcW(hwnd, msg, wp, lp);
+        p->rgrc[0].top = top + (IsZoomed(hwnd) ? frame_border_y(hwnd) : 0);
+        return 0;
+      }
+      break;
+    case WM_NCHITTEST:
+      if (titlebar_active(f)) return titlebar_hit(f, wp, lp);
+      break;
+    case WM_NCLBUTTONDBLCLK:
+      // The bar's caption, double-clicked: maximize or restore, here and
+      // not left to DefWindowProc (Wine's leaves a maximized window as it
+      // is when its caption is in the client area).
+      if (wp == HTCAPTION && titlebar_active(f)) {
+        ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+        return 0;
+      }
+      break;
+    case WM_ACTIVATE:
+      titlebar_update(f);
+      break;
     case WM_SIZE:
       if (wp != SIZE_MINIMIZED) layout(f);
       return 0;
@@ -138,6 +269,20 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
 
     case WM_MOUSEMOVE:
+      if (f->pressing) {
+        // A tab in the title bar dragged: the window moves, as in Chrome.
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (abs(x - f->press.x) > GetSystemMetrics(SM_CXDRAG) ||
+            abs(y - f->press.y) > GetSystemMetrics(SM_CYDRAG)) {
+          f->pressing = false;
+          ReleaseCapture();
+          POINT sp = f->press;
+          ClientToScreen(hwnd, &sp);
+          SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION,
+                       MAKELPARAM(sp.x, sp.y));
+        }
+        return 0;
+      }
       track_bar_mouse(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
       return 0;
     case WM_MOUSELEAVE:
@@ -146,10 +291,27 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       f->hover_close = f->hover_plus = false;
       invalidate_bar(f);
       return 0;
+    case WM_LBUTTONUP:
+      if (f->pressing) {
+        f->pressing = false;
+        ReleaseCapture();
+      }
+      return 0;
+    case WM_CAPTURECHANGED:
+      f->pressing = false;
+      return 0;
     case WM_LBUTTONDOWN: {
       int i;
       switch (bar_hit(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &i)) {
-        case HIT_TAB: select_tab(f, i); break;
+        case HIT_TAB:
+          select_tab(f, i);
+          if (titlebar_active(f)) {
+            f->pressing = true;
+            f->press.x = GET_X_LPARAM(lp);
+            f->press.y = GET_Y_LPARAM(lp);
+            SetCapture(hwnd);
+          }
+          break;
         case HIT_CLOSE: close_tab(f->tabs[i]); break;
         case HIT_PLUS: {
           Window* cur = f->active >= 0 ? f->tabs[f->active] : NULL;

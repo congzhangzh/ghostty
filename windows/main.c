@@ -141,6 +141,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "ghostty: config: %s\n", d.message);
   }
   read_host_config();
+  titlebar_choose();
 
   g_inst = GetModuleHandleW(NULL);
   WNDCLASSEXW fc = {sizeof(fc)};

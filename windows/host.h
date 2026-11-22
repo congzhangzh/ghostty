@@ -27,6 +27,7 @@
 // After windows.h:
 #define PSAPI_VERSION 2
 #include <dbghelp.h>
+#include <dwmapi.h>
 #include <psapi.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
@@ -74,6 +75,14 @@
 #endif
 
 typedef struct Frame Frame;
+
+// What a point of the tab bar is (tabs.c).
+typedef enum {
+  HIT_NONE,
+  HIT_TAB,
+  HIT_CLOSE,
+  HIT_PLUS,
+} BarHit;
 
 // A tab: a child window of its Frame, with one surface drawing into it.
 typedef struct Window {
@@ -125,6 +134,12 @@ struct Frame {
   // the new-tab button, or nothing.
   int hover;
   bool hover_close, hover_plus, tracking;
+
+  // Tabs in the title bar: the width and height Windows' caption buttons
+  // take (client pixels), and a tab pressed that may become a window drag.
+  int buttons_w, buttons_h;
+  bool pressing;
+  POINT press;
   HFONT font;
   UINT font_dpi;
 
@@ -142,7 +157,6 @@ struct Frame {
 typedef enum { TAB_BAR_AUTO, TAB_BAR_ALWAYS, TAB_BAR_NEVER } TabBarMode;
 
 
-typedef enum { HIT_NONE, HIT_TAB, HIT_CLOSE, HIT_PLUS } BarHit;
 #define GHOSTTY_PANIC_CODE 0xE0474850u
 
 extern ghostty_app_t g_app;
@@ -200,6 +214,15 @@ Window* new_tab(Frame* f, ghostty_surface_t from,
                        ghostty_surface_context_e context);
 void move_tab(Frame* f, int amount);
 void close_tab(Window* w);
+extern bool g_titlebar_tabs;
+void titlebar_choose(void);
+bool titlebar_active(Frame* f);
+LRESULT titlebar_hit(Frame* f, WPARAM wp, LPARAM lp);
+int frame_border_y(HWND hwnd);
+int bar_height(Frame* f);
+COLORREF bar_color(void);
+bool bar_is_dark(void);
+void titlebar_update(Frame* f);
 void stats_start(void);
 void stats_tick_all(void);
 void set_stats(Frame* f, bool on);

@@ -80,7 +80,7 @@ done
 zig c++ -target "$arch-windows-gnu" "${opt[@]}" \
 	"${objs[@]}" \
 	"$prefix/lib/ghostty-internal-static.lib" \
-	-lopengl32 -lgdi32 -luser32 -lshell32 -lole32 -lws2_32 -lmswsock -lntdll -ldbghelp -ladvapi32 \
+	-lopengl32 -lgdi32 -luser32 -lshell32 -lole32 -lws2_32 -lmswsock -lntdll -ldbghelp -ladvapi32 -ldwmapi \
 	"${sub[@]}" \
 	-o "$out/ghostty.exe"
 rm -f "${objs[@]}"
