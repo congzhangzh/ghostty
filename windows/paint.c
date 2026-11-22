@@ -33,6 +33,8 @@ void take_frame(Window* w) {
   }
   w->tick_swizzle_ms += (double)(qpc() - t0) * g_qpc_ms;
   w->tick_frames++;
+  w->tick_gpu_wait_ms += f.gpu_wait_ns / 1e6;
+  w->tick_readback_ms += f.readback_ns / 1e6;
   if (w->key_qpc) {
     w->frame_key_qpc = w->key_qpc;
     w->key_qpc = 0;

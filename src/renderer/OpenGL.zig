@@ -4,6 +4,7 @@ pub const OpenGL = @This();
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const global = @import("../global.zig");
 const gl = @import("opengl");
 const egl = gl.egl;
 const shadertoy = @import("shadertoy.zig");
@@ -354,11 +355,22 @@ pub fn present(
         }
     }
 
+    // What the readback costs, for the host's stats (Windows): first the
+    // wait for the GPU to finish the frame (glReadPixels would wait the
+    // same, unseen), then the copy into CPU memory.
+    const io = global.io();
+    const t0: std.Io.Timestamp = .now(io, .awake);
+    if (comptime Device.api == .wgl) gl.finish();
+    const t1: std.Io.Timestamp = .now(io, .awake);
+    const pixels = try target.readPixelsAlloc(self.alloc);
+    const t2: std.Io.Timestamp = .now(io, .awake);
     return .{ .memory = .{
         .width = @intCast(target.width),
         .height = @intCast(target.height),
-        .pixels = try target.readPixelsAlloc(self.alloc),
+        .pixels = pixels,
         .alloc = self.alloc,
+        .gpu_wait_ns = @intCast(@max(0, t0.durationTo(t1).nanoseconds)),
+        .readback_ns = @intCast(@max(0, t1.durationTo(t2).nanoseconds)),
     } };
 }
 
@@ -374,6 +386,10 @@ pub const ExportedFrame = union(enum) {
         height: u32,
         pixels: []u8,
         alloc: Allocator,
+        /// On the render thread: waiting for the GPU to finish this
+        /// frame, then reading it back (glReadPixels).
+        gpu_wait_ns: u64 = 0,
+        readback_ns: u64 = 0,
 
         pub fn deinit(self: Memory) void {
             self.alloc.free(self.pixels);

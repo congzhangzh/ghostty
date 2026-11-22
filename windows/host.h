@@ -98,11 +98,12 @@ typedef struct Window {
   // update, and a key press waiting for the frame that follows it.
   uint32_t tick_frames;
   double tick_swizzle_ms, tick_blit_ms;
+  double tick_gpu_wait_ms, tick_readback_ms;  // the render thread's, per frame taken
   uint64_t key_qpc;        // a key went down, no frame taken since
   uint64_t frame_key_qpc;  // the frame shown now is the first after it
   double latency_ms;       // that key to the end of its frame's paint
   // Over the last stats period: frames per second, host ms per frame.
-  double fps, swizzle_avg_ms, blit_avg_ms;
+  double fps, swizzle_avg_ms, blit_avg_ms, gpu_wait_avg_ms, readback_avg_ms;
 } Window;
 
 // A top-level window: its tabs, the selected one, and the tab bar.
@@ -133,6 +134,7 @@ struct Frame {
   uint64_t stats_qpc;
   ULONGLONG stats_cpu;  // process CPU time (100 ns) at stats_qpc
   double fps, swizzle_ms, blit_ms, cpu_pct, ws_mb, private_mb;
+  double gpu_wait_ms, readback_ms;
   HFONT stats_font;
   UINT stats_font_dpi;
 };

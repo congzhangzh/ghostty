@@ -531,6 +531,10 @@ typedef struct {
   uint32_t stride;
   const uint8_t* GHOSTTY_NULLABLE pixels;
   void* GHOSTTY_NULLABLE handle;
+  // The render thread's cost for this frame: waiting for the GPU to finish
+  // it, then reading it back into CPU memory (nanoseconds).
+  uint64_t gpu_wait_ns;
+  uint64_t readback_ns;
 } ghostty_frame_s;
 
 typedef enum {
