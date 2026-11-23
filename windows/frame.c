@@ -26,13 +26,15 @@ void set_fullscreen(Frame* w, bool on) {
                  SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
   } else {
     w->fullscreen = false;
+    reveal_fullscreen(w, false);  // the reveal bar goes (reveal.c)
     SetWindowLongW(w->hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
     SetWindowPlacement(w->hwnd, &w->placement);
     SetWindowPos(w->hwnd, NULL, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
                      SWP_FRAMECHANGED);
   }
-  layout(w);  // the bar: the title bar again, or the full screen one
+  layout(w);  // the bar: the title bar again, or none (the reveal bar's)
+  if (on) reveal_fullscreen(w, true);  // the top edge reveals the bar (reveal.c)
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +356,7 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       quick_activate(f, wp, lp);  // autohide (quick.c)
       break;
     case WM_TIMER:
-      if (theme_timer(f, wp) || quick_timer(f, wp)) return 0;
+      if (theme_timer(f, wp) || quick_timer(f, wp) || reveal_timer(f, wp)) return 0;
       break;
     case WM_SETTINGCHANGE:
       // Windows' light/dark app mode changed: light:/dark: themes follow.
@@ -466,6 +468,10 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case HIT_HELP:  // the overview, for the pane in front
           if (f->active >= 0) palette_toggle(f->tabs[f->active]);
           break;
+        case HIT_EXITFS:  // the reveal bar's: back to the window
+          f->reveal_painting = false;
+          set_fullscreen(f, false);
+          break;
         default: break;
       }
       return 0;
@@ -509,6 +515,11 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // The tabs' own WM_DESTROY comes after this one (children go after
       // their parent); they must not rearrange a window that is going.
       f->destroying = true;
+      if (f->reveal) {
+        SetWindowLongPtrW(f->reveal, GWLP_USERDATA, 0);
+        DestroyWindow(f->reveal);
+        f->reveal = NULL;
+      }
       return 0;
     case WM_NCDESTROY: {
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);

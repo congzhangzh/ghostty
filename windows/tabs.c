@@ -26,6 +26,9 @@ bool g_titlebar_tabs;
 bool titlebar_active(Frame* f) { return g_titlebar_tabs && !f->fullscreen; }
 
 int bar_height(Frame* f) {
+  // Full screen: the terminal takes the whole screen; the bar is the
+  // reveal bar's (reveal.c), over it, never in the layout.
+  if (f->fullscreen && !f->quick) return f->reveal_painting ? px(f, 30) : 0;
   // In the title bar: as tall as Windows' caption buttons (the caption at
   // this monitor's DPI), at least the bar's own height.
   if (titlebar_active(f))
@@ -41,15 +44,30 @@ int bar_height(Frame* f) {
 // The "?" button: one caption button's size, just left of Windows'
 // minimize button, in the title bar only (none in full screen).
 bool help_rect(Frame* f, RECT* r) {
-  if (!titlebar_active(f) || f->buttons_w <= 0) return false;
   RECT rc;
   GetClientRect(f->hwnd, &rc);
+  if (f->reveal_painting) {  // the reveal bar: ? then exit, at the right end
+    int w = px(f, 46);
+    SetRect(r, rc.right - 2 * w, 0, rc.right - w, px(f, 30));
+    return true;
+  }
+  if (!titlebar_active(f) || f->buttons_w <= 0) return false;
   int w = f->buttons_w / 3, h = f->buttons_h > 0 ? f->buttons_h : bar_height(f);
   SetRect(r, rc.right - f->buttons_w - w, 0, rc.right - f->buttons_w, h);
   return true;
 }
 
+// The reveal bar's exit-full-screen button, right of its ?.
+bool exitfs_rect(Frame* f, RECT* r) {
+  if (!f->reveal_painting) return false;
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  SetRect(r, rc.right - px(f, 46), 0, rc.right, px(f, 30));
+  return true;
+}
+
 static int bar_end(Frame* f, int width) {
+  if (f->reveal_painting) return width - 2 * px(f, 46);
   if (!titlebar_active(f)) return width;
   RECT h;
   int help = help_rect(f, &h) ? h.right - h.left : 0;
@@ -112,6 +130,7 @@ BarHit bar_hit(Frame* f, int x, int y, int* index) {
   RECT help;
   POINT pt = {x, y};
   if (help_rect(f, &help) && PtInRect(&help, pt)) return HIT_HELP;
+  if (exitfs_rect(f, &help) && PtInRect(&help, pt)) return HIT_EXITFS;
   if (b == 0 || y < 0 || y >= b || x < 0 || x >= end) return HIT_NONE;
   if (x >= xp + b) return HIT_NONE;  // after the +: the caption
   if (x >= xp) return HIT_PLUS;
@@ -168,7 +187,7 @@ COLORREF bar_color(void) {
 
 bool bar_is_dark(void) { return is_dark(bar_color()); }
 
-static void draw_bar(Frame* f, HDC dc, int width, int b) {
+void draw_bar(Frame* f, HDC dc, int width, int b) {
   f->slogan_shown = 0;
   COLORREF bar = bar_color();
   COLORREF hover = mix(bar, g_bg, 0.5);
@@ -225,6 +244,17 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, f->hover_help ? g_fg : dim);
     DrawTextW(dc, L"?", 1, &help, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  }
+  // The reveal bar's exit (full screen → window): two corners pointing in.
+  RECT ex;
+  if (exitfs_rect(f, &ex)) {
+    if (f->hover_exitfs) fill(dc, ex.left, ex.top, ex.right, ex.bottom, hover);
+    COLORREF c = f->hover_exitfs ? g_fg : dim;
+    int cx = (ex.left + ex.right) / 2, cy = (ex.top + ex.bottom) / 2, s = px(f, 5), g = px(f, 2);
+    stroke(dc, cx - s - g, cy - g, cx - g, cy - g, lw, c);  // top-left corner
+    stroke(dc, cx - g, cy - s - g, cx - g, cy - g + 1, lw, c);
+    stroke(dc, cx + g, cy + g, cx + s + g, cy + g, lw, c);  // bottom-right corner
+    stroke(dc, cx + g, cy + g, cx + g, cy + s + g, lw, c);
   }
   fill(dc, xp, b - 1, width, b, line);
   int cx = xp + b / 2, cy = b / 2, h = px(f, 6);

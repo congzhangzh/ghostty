@@ -102,7 +102,8 @@ typedef enum {
   HIT_TAB,
   HIT_CLOSE,
   HIT_PLUS,
-  HIT_HELP,  // the "?" left of Windows' caption buttons: the overview
+  HIT_HELP,    // the "?" left of Windows' caption buttons: the overview
+  HIT_EXITFS,  // the reveal bar's exit-full-screen button (reveal.c)
 } BarHit;
 
 // A tab: a child window of its Frame, with one surface drawing into it.
@@ -178,7 +179,14 @@ struct Frame {
   // The tab bar under the mouse: a tab (and whether its close button),
   // the new-tab button, or nothing.
   int hover;
-  bool hover_close, hover_plus, hover_help, tracking;
+  bool hover_close, hover_plus, hover_help, hover_exitfs, tracking;
+  // Full screen's reveal bar (reveal.c): its window, shown, the dwell and
+  // the time away (ms), shown until (a tick), and "being painted or hit
+  // tested now" (bar_height then answers the bar's height).
+  HWND reveal;
+  bool reveal_on, reveal_painting;
+  int reveal_dwell, reveal_away;
+  uint64_t reveal_hold;
 
   // Tabs in the title bar: the width and height Windows' caption buttons
   // take (client pixels), and a tab pressed that may become a window drag.
@@ -323,6 +331,11 @@ void scheme_cycle(void);
 void quick_toggle(void);
 void palette_toggle(Window* w);
 bool help_rect(Frame* f, RECT* r);
+bool exitfs_rect(Frame* f, RECT* r);
+void draw_bar(Frame* f, HDC dc, int width, int b);
+void reveal_fullscreen(Frame* f, bool on);
+bool reveal_timer(Frame* f, WPARAM id);
+bool reveal_shown(Frame* f);
 bool open_url(ghostty_action_open_url_kind_e kind, const char* url, size_t len, bool dry);
 void trigger_text(ghostty_input_trigger_s t, WCHAR* out, size_t cap);
 bool quick_timer(Frame* f, WPARAM id);
@@ -331,7 +344,9 @@ void quick_gone(Frame* f);
 void quick_hotkey_update(void);
 bool quick_hotkey(WPARAM id);
 const WCHAR* theme_hint(void);
-void hint_show(const WCHAR* text);  // a line in the title bar for a few seconds (theme.c)
+void hint_show(const WCHAR* text);
+bool host_ini_get(const char* key, char* out, size_t cap);
+void host_ini_set(const char* key, const char* value);  // a line in the title bar for a few seconds (theme.c)
 bool theme_timer(Frame* f, WPARAM id);
 void theme_menu_add(HMENU sys);
 void theme_menu_update(HMENU sys);

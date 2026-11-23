@@ -74,8 +74,13 @@ static void items_add(const WCHAR* title, const WCHAR* desc, const char* action,
   }
 }
 
-static void items_load(void) {
+static void items_load(Frame* f) {
   items_free();
+  // In full screen: the way back first (the owner's "Exit full screen — F11").
+  if (f && f->fullscreen && !f->quick) {
+    items_add(L"Exit full screen", L"Back to the window", "toggle_fullscreen", 0);
+    if (g_nitems) wcscpy(g_items[g_nitems - 1].key, L"F11");
+  }
   ghostty_config_command_list_s list = {0};
   static const char k[] = "command-palette-entry";
   if (g_config && ghostty_config_get(g_config, &list, k, strlen(k))) {
@@ -359,7 +364,7 @@ void palette_toggle(Window* w) {
                            CLEARTYPE_QUALITY, 0, L"Segoe UI");
   g_pal_small = CreateFontW(-(int)(12 * f->scale), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
                             CLEARTYPE_QUALITY, 0, L"Segoe UI");
-  items_load();
+  items_load(f);
   g_pal_frame = f;
   g_pal_pane = w->id;
   RECT fr;

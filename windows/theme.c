@@ -224,15 +224,42 @@ int scheme_mode(void) {
   return g_scheme_mode;
 }
 
+// host.ini, the host's own settings: one `key = value` set, the others
+// (and the header) kept.
+bool host_ini_get(const char* key, char* out, size_t cap) { return read_value(L"host.ini", key, out, cap); }
+
+void host_ini_set(const char* key, const char* value) {
+  WCHAR path[MAX_PATH + 64];
+  Line t = {0};
+  bool done = false;
+  size_t k = strlen(key);
+  if (host_path(L"host.ini", path, MAX_PATH + 64)) {
+    FILE* f = _wfopen(path, L"rb");
+    char line[512];
+    while (f && fgets(line, sizeof(line), f)) {
+      const char* p = line;
+      while (*p == ' ' || *p == '\t') p++;
+      const char* q = p + k;
+      while (*q == ' ' || *q == '\t') q++;
+      if (strncmp(p, key, k) == 0 && *q == '=') {
+        if (!done) put(&t, "%s = %s\n", key, value);
+        done = true;
+      } else {
+        put(&t, "%s", line);
+      }
+    }
+    if (f) fclose(f);
+  }
+  if (!t.len) put(&t, "# Ghostty for Windows' own settings (the window menu writes them).\n");
+  if (!done) put(&t, "%s = %s\n", key, value);
+  write_text(L"host.ini", t.p);
+  free(t.p);
+}
+
 static void set_scheme_mode(int mode) {
   static const char* const names[] = {"auto", "light", "dark"};
   g_scheme_mode = mode;
-  char text[160];
-  snprintf(text, sizeof(text),
-           "# Ghostty for Windows' own settings (the window menu writes them).\n"
-           "scheme = %s\n",
-           names[mode]);
-  write_text(L"host.ini", text);
+  host_ini_set("scheme", names[mode]);
   color_scheme_apply();
   menus_update();
   char ev[64];
