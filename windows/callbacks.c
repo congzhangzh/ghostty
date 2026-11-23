@@ -300,6 +300,10 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       }
       return true;
 
+    case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
+      palette_toggle(w);  // palette.c
+      return true;
+
     case GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL:
       quick_toggle();
       return true;

@@ -318,6 +318,8 @@ char* theme_config_file(void);
 int scheme_mode(void);
 void scheme_cycle(void);
 void quick_toggle(void);
+void palette_toggle(Window* w);
+void trigger_text(ghostty_input_trigger_s t, WCHAR* out, size_t cap);
 bool quick_timer(Frame* f, WPARAM id);
 void quick_activate(Frame* f, WPARAM wp, LPARAM lp);
 void quick_gone(Frame* f);

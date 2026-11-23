@@ -7228,6 +7228,17 @@ pub const Keybinds = struct {
                 .{ .toggle_quick_terminal = {} },
                 .{ .global = true },
             );
+
+            // The command palette also on Ctrl+Shift+/ (Ctrl+? on a US
+            // layout; the key's place, so it works on any layout), beside
+            // upstream's Ctrl+Shift+P: the owner asked for "ctrl shift + ?
+            // to show keyboard overview", and the palette shows every
+            // command with its key. In-app only; free in the defaults.
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .slash }, .mods = .{ .ctrl = true, .shift = true } },
+                .toggle_command_palette,
+            );
         }
 
         // Toggle zoom a split

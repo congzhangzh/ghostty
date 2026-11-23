@@ -275,19 +275,38 @@ static UINT trigger_vk(ghostty_input_trigger_s t) {
   }
 }
 
-// A key as Windows shows it: "Win+`", "Ctrl+Alt+T", "F12".
+// A key as Windows shows it: "Win+`", "Ctrl+Alt+T", "F12", "Ctrl+Shift+Enter".
 static void key_name(UINT vk, UINT mods, WCHAR* out, size_t cap) {
-  WCHAR key[16];
+  WCHAR key[32];
   UINT ch = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) & 0x7fffffff;
   if (vk >= VK_F1 && vk <= VK_F24)
-    swprintf(key, 16, L"F%u", vk - VK_F1 + 1);
-  else if (ch)
-    swprintf(key, 16, L"%lc", (wint_t)towupper((wint_t)ch));
-  else
-    swprintf(key, 16, L"0x%02X", vk);
+    swprintf(key, 32, L"F%u", vk - VK_F1 + 1);
+  else if (ch > L' ')
+    swprintf(key, 32, L"%lc", (wint_t)towupper((wint_t)ch));
+  else {
+    // Enter, Tab, Space, the arrows, Home…: the keyboard's own name.
+    bool ext = vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT || vk == VK_HOME ||
+               vk == VK_END || vk == VK_PRIOR || vk == VK_NEXT || vk == VK_INSERT || vk == VK_DELETE;
+    LONG lp = (LONG)(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) << 16) | (ext ? (1 << 24) : 0);
+    if (!GetKeyNameTextW(lp, key, 32)) swprintf(key, 32, L"0x%02X", vk);
+  }
   swprintf(out, cap, L"%ls%ls%ls%ls%ls", (mods & MOD_CONTROL) ? L"Ctrl+" : L"",
            (mods & MOD_ALT) ? L"Alt+" : L"", (mods & MOD_SHIFT) ? L"Shift+" : L"",
            (mods & MOD_WIN) ? L"Win+" : L"", key);
+}
+
+// A trigger (a config binding) as text, "" for none: the command palette's
+// key column.
+void trigger_text(ghostty_input_trigger_s t, WCHAR* out, size_t cap) {
+  out[0] = 0;
+  UINT vk = trigger_vk(t);
+  if (!vk) return;
+  UINT mods = 0;
+  if (t.mods & GHOSTTY_MODS_SHIFT) mods |= MOD_SHIFT;
+  if (t.mods & GHOSTTY_MODS_CTRL) mods |= MOD_CONTROL;
+  if (t.mods & GHOSTTY_MODS_ALT) mods |= MOD_ALT;
+  if (t.mods & GHOSTTY_MODS_SUPER) mods |= MOD_WIN;
+  key_name(vk, mods, out, cap);
 }
 
 // (Re)register the global key from the config: at start and on each change.
