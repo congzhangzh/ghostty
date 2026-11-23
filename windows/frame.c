@@ -1,5 +1,7 @@
 #include "host.h"
 
+#include <shobjidl.h>  // ITaskbarList2 (MarkFullscreenWindow)
+
 // ---------------------------------------------------------------------------
 // Full screen
 
@@ -7,6 +9,24 @@
 // window is on (not just its work area), on top. Windows hides the taskbar
 // for a foreground window that covers its monitor. Leaving restores the
 // placement saved on entry, maximized or not.
+// Tell the taskbar a window is full screen (or not): Windows keeps the
+// taskbar over a window it takes for a maximized one, over its last rows.
+static void mark_fullscreen(HWND hwnd, bool on) {
+  static ITaskbarList2* tb;
+  static bool tried;
+  if (!tried) {
+    tried = true;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);  // S_FALSE / RPC_E_CHANGED_MODE: already up
+    if (CoCreateInstance(&CLSID_TaskbarList, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskbarList2, (void**)&tb) != S_OK)
+      tb = NULL;
+    else if (tb->lpVtbl->HrInit(tb) != S_OK) {
+      tb->lpVtbl->Release(tb);
+      tb = NULL;
+    }
+  }
+  if (tb) tb->lpVtbl->MarkFullscreenWindow(tb, hwnd, on);
+}
+
 void set_fullscreen(Frame* w, bool on) {
   if (on == w->fullscreen || w->quick) return;  // the quick terminal keeps its place
   LONG style = GetWindowLongW(w->hwnd, GWL_STYLE);
@@ -19,14 +39,21 @@ void set_fullscreen(Frame* w, bool on) {
       return;
     // First: WM_NCCALCSIZE during the change asks titlebar_active.
     w->fullscreen = true;
-    SetWindowLongW(w->hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+    // Not maximized while full screen (the owner on .11: "when switch to
+    // full screen, a line where cursor is is missing"): a window still
+    // WS_MAXIMIZE is a maximized one to the shell, which keeps the taskbar
+    // over its bottom rows, the cursor's. The placement keeps "maximized"
+    // for the way back.
+    SetWindowLongW(w->hwnd, GWL_STYLE, style & ~(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE));
     SetWindowPos(w->hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                  mi.rcMonitor.right - mi.rcMonitor.left,
                  mi.rcMonitor.bottom - mi.rcMonitor.top,
                  SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    mark_fullscreen(w->hwnd, true);
   } else {
     w->fullscreen = false;
     reveal_fullscreen(w, false);  // the reveal bar goes (reveal.c)
+    mark_fullscreen(w->hwnd, false);
     SetWindowLongW(w->hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
     SetWindowPlacement(w->hwnd, &w->placement);
     SetWindowPos(w->hwnd, NULL, 0, 0, 0, 0,
