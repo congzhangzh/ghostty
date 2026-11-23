@@ -574,6 +574,21 @@ LRESULT testctl_ui(LPARAM lp) {
       free(a);
     } else if (strcmp(cmd, "read") == 0) {
       ok = cmd_read(w, b);
+    } else if (strcmp(cmd, "open_url") == 0) {
+      // {"cmd":"open_url","url":"…","kind":"osc8|unknown|text|html","dry":true}:
+      // the host's OPEN_URL decision (callbacks.c); dry: decide, open nothing.
+      char* url = jstr(&o, "url");
+      char* k = jstr(&o, "kind");
+      ghostty_action_open_url_kind_e kind = GHOSTTY_ACTION_OPEN_URL_KIND_OSC8;
+      if (k && strcmp(k, "unknown") == 0) kind = GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN;
+      if (k && strcmp(k, "text") == 0) kind = GHOSTTY_ACTION_OPEN_URL_KIND_TEXT;
+      if (k && strcmp(k, "html") == 0) kind = GHOSTTY_ACTION_OPEN_URL_KIND_HTML;
+      ok = url != NULL;
+      const JField* dry = jget(&o, "dry");
+      if (ok) open_url(kind, url, strlen(url), dry && dry->vlen >= 4 && strncmp(dry->v, "true", 4) == 0);
+      else put(b, ",\"error\":\"open_url: no url\"");
+      free(url);
+      free(k);
     } else if (strcmp(cmd, "drop") == 0) {
       // {"cmd":"drop","paths":"a|b"}: files dropped on the pane, as
       // Explorer's drop arrives (WM_DROPFILES with a DROPFILES block).

@@ -300,6 +300,10 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       }
       return true;
 
+    case GHOSTTY_ACTION_OPEN_URL:  // only http, https, mailto (below)
+      return open_url(action.action.open_url.kind, action.action.open_url.url,
+                      action.action.open_url.len, false);
+
     case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
       palette_toggle(w);  // palette.c
       return true;
@@ -350,4 +354,105 @@ void close_surface_cb(void* ud, bool process_alive) {
   (void)process_alive;
   Window* w = ud;
   if (w && w->hwnd) PostMessageW(w->hwnd, WM_GHOSTTY_DESTROY, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Opening links (OPEN_URL): Ctrl+click on a link, OSC 8 hyperlinks
+//
+// A link's target comes from what programs print, so it is untrusted (the
+// macOS app's UntrustedURL, Helpers/UntrustedURL.swift, likewise): only
+// http, https (with a //host) and mailto are opened, with ShellExecute
+// "open", i.e. in the default browser or mail app. Never a path, a file:
+// URL or another scheme: ShellExecute would start a program for them
+// (calc.exe, a .bat, a custom protocol handler). A quote, whitespace or a
+// control character is refused too: the handler gets the URL in its own
+// command line ("%1"), where a quote could add arguments.
+// Files the core wrote itself (write_screen_file …, kind text or html) open
+// only when they are a regular file in the temp folder: text in Notepad,
+// html in the browser.
+
+static bool url_scheme(const char* u, char* out, size_t cap) {
+  size_t i = 0;
+  if (!isalpha((unsigned char)u[0])) return false;
+  while (u[i] && u[i] != ':' && i + 1 < cap) {
+    char c = u[i];
+    if (!isalnum((unsigned char)c) && c != '+' && c != '-' && c != '.') return false;
+    out[i] = (char)tolower((unsigned char)c);
+    i++;
+  }
+  out[i] = 0;
+  return u[i] == ':';
+}
+
+// NULL when `url` may be opened, else why not.
+const char* url_refused(const char* url) {
+  for (const unsigned char* p = (const unsigned char*)url; *p; p++)
+    if (*p <= ' ' || *p == 0x7f || *p == '"' || *p == '<' || *p == '>' || *p == '`' || *p == '\\')
+      return "a quote, space, control character or backslash in it";
+  char scheme[16];
+  if (!url_scheme(url, scheme, sizeof(scheme))) return "no scheme (a path is never opened)";
+  const char* rest = url + strlen(scheme) + 1;
+  if (strcmp(scheme, "http") == 0 || strcmp(scheme, "https") == 0) {
+    if (strncmp(rest, "//", 2) != 0 || !rest[2] || rest[2] == '/') return "no //host";
+    return NULL;
+  }
+  if (strcmp(scheme, "mailto") == 0) return *rest ? NULL : "an empty mailto";
+  return "only http, https and mailto are opened";
+}
+
+// A file the core wrote: a regular file in the temp folder, of `ext`.
+static bool temp_file(const WCHAR* path, const WCHAR* ext) {
+  WCHAR tmp[MAX_PATH], full[MAX_PATH];
+  DWORD n = GetTempPathW(MAX_PATH, tmp);
+  if (!n || n >= MAX_PATH || !GetFullPathNameW(path, MAX_PATH, full, NULL)) return false;
+  DWORD a = GetFileAttributesW(full);
+  if (a == INVALID_FILE_ATTRIBUTES || (a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return false;
+  if (_wcsnicmp(full, tmp, wcslen(tmp)) != 0) return false;
+  const WCHAR* dot = wcsrchr(full, L'.');
+  return dot && _wcsicmp(dot, ext) == 0;
+}
+
+static void url_event(const char* url, bool opened, const char* why) {
+  Line e = {0};
+  put(&e, "{\"kind\":\"open_url\",\"url\":");
+  put_string(&e, url);
+  put(&e, ",\"opened\":%s,\"why\":", opened ? "true" : "false");
+  put_string(&e, why ? why : "");
+  put(&e, "}");
+  test_event(e.p);
+  free(e.p);
+}
+
+// The action; `dry`: decide only (the test pipe).
+bool open_url(ghostty_action_open_url_kind_e kind, const char* p, size_t len, bool dry) {
+  char* url = malloc(len + 1);
+  if (!url) return false;
+  memcpy(url, p, len);
+  url[len] = 0;
+  const char* why = NULL;
+  bool opened = false;
+  WCHAR* w = utf8_to_utf16(url, -1);
+  if (!w) why = "not UTF-8";
+  else if (kind == GHOSTTY_ACTION_OPEN_URL_KIND_TEXT || kind == GHOSTTY_ACTION_OPEN_URL_KIND_HTML) {
+    bool text = kind == GHOSTTY_ACTION_OPEN_URL_KIND_TEXT;
+    if (!temp_file(w, text ? L".txt" : L".html")) why = "not a file Ghostty wrote in the temp folder";
+    else if (!dry) {
+      if (text) {
+        WCHAR args[MAX_PATH + 4];
+        swprintf(args, MAX_PATH + 4, L"\"%ls\"", w);
+        opened = (INT_PTR)ShellExecuteW(NULL, L"open", L"notepad.exe", args, NULL, SW_SHOWNORMAL) > 32;
+      } else {
+        opened = (INT_PTR)ShellExecuteW(NULL, L"open", w, NULL, NULL, SW_SHOWNORMAL) > 32;
+      }
+      if (!opened) why = "ShellExecute failed";
+    }
+  } else if (!(why = url_refused(url)) && !dry) {
+    opened = (INT_PTR)ShellExecuteW(NULL, L"open", w, NULL, NULL, SW_SHOWNORMAL) > 32;
+    if (!opened) why = "ShellExecute failed";
+  }
+  if (why) fprintf(stderr, "ghostty: open url: not opened: %s (%s)\n", url, why);
+  url_event(url, opened || (dry && !why), why);
+  free(w);
+  free(url);
+  return true;
 }

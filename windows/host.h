@@ -319,6 +319,7 @@ int scheme_mode(void);
 void scheme_cycle(void);
 void quick_toggle(void);
 void palette_toggle(Window* w);
+bool open_url(ghostty_action_open_url_kind_e kind, const char* url, size_t len, bool dry);
 void trigger_text(ghostty_input_trigger_s t, WCHAR* out, size_t cap);
 bool quick_timer(Frame* f, WPARAM id);
 void quick_activate(Frame* f, WPARAM wp, LPARAM lp);
