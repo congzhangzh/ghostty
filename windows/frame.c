@@ -375,6 +375,11 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
 
     case WM_MOUSEMOVE:
+      if (f->drag) {  // a divider being dragged (tabs.c)
+        POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        divider_drag_to(f, p);
+        return 0;
+      }
       if (f->pressing) {
         // A tab in the title bar dragged: the window moves, as in Chrome.
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
@@ -398,6 +403,11 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       invalidate_bar(f);
       return 0;
     case WM_LBUTTONUP:
+      if (f->drag) {
+        f->drag = NULL;
+        ReleaseCapture();
+        return 0;
+      }
       if (f->pressing) {
         f->pressing = false;
         ReleaseCapture();
@@ -405,9 +415,28 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_CAPTURECHANGED:
       f->pressing = false;
+      f->drag = NULL;
       return 0;
+    case WM_SETCURSOR:
+      if ((HWND)wp == hwnd && LOWORD(lp) == HTCLIENT) {
+        POINT p;
+        GetCursorPos(&p);
+        ScreenToClient(hwnd, &p);
+        Node* d = divider_at(f, p);
+        if (d) {
+          SetCursor(LoadCursorW(NULL, divider_cursor(d)));
+          return TRUE;
+        }
+      }
+      break;
     case WM_LBUTTONDOWN: {
       int i;
+      POINT at = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      Node* d = divider_at(f, at);  // the one-pixel divider itself
+      if (d) {
+        divider_drag_start(f, d);
+        return 0;
+      }
       switch (bar_hit(f, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &i)) {
         case HIT_TAB:
           select_tab(f, i);

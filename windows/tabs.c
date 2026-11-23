@@ -734,6 +734,65 @@ bool toggle_split_zoom(Window* w) {
   return true;
 }
 
+// ---- dragging a divider ----------------------------------------------------
+//
+// A divider is one pixel; it can be taken within 3 points of it, inside the
+// panes (their windows get the mouse there: the pane sends the press to the
+// frame, which captures the mouse and moves the split's ratio).
+
+static Node* divider_in(Node* n, RECT r, POINT p, int tol) {
+  if (!n || n->pane) return NULL;
+  RECT a = r, b = r;
+  int cut;
+  if (n->vertical) {
+    cut = r.top + (int)((r.bottom - r.top - 1) * n->ratio + 0.5);
+    a.bottom = cut;
+    b.top = cut + 1;
+  } else {
+    cut = r.left + (int)((r.right - r.left - 1) * n->ratio + 0.5);
+    a.right = cut;
+    b.left = cut + 1;
+  }
+  Node* d = divider_in(n->a, a, p, tol);  // the deeper one first
+  if (!d) d = divider_in(n->b, b, p, tol);
+  if (d) return d;
+  // ("near" is a macro in Windows' headers, a 16-bit leftover.)
+  bool on = n->vertical
+                ? abs(p.y - cut) <= tol && p.x >= r.left && p.x < r.right
+                : abs(p.x - cut) <= tol && p.y >= r.top && p.y < r.bottom;
+  return on ? n : NULL;
+}
+
+// The split of the selected tab whose divider is under p (the frame's
+// client coordinates), or NULL; none in a zoomed tab.
+Node* divider_at(Frame* f, POINT p) {
+  if (f->active < 0) return NULL;
+  Tab* t = f->tabs[f->active]->tab;
+  if (!t || t->zoomed || !t->root) return NULL;
+  return divider_in(t->root, tab_area(f), p, px(f, 3));
+}
+
+LPCWSTR divider_cursor(Node* n) { return n->vertical ? IDC_SIZENS : IDC_SIZEWE; }
+
+void divider_drag_start(Frame* f, Node* n) {
+  f->drag = n;
+  SetCapture(f->hwnd);
+}
+
+// The divider follows the mouse (kept between 10% and 90%).
+void divider_drag_to(Frame* f, POINT p) {
+  Node* n = f->drag;
+  if (!n || f->active < 0) return;
+  Tab* t = f->tabs[f->active]->tab;
+  RECT r;
+  if (!t || !node_rect(t->root, tab_area(f), n, &r)) return;
+  int extent = (n->vertical ? r.bottom - r.top : r.right - r.left) - 1;
+  if (extent <= 0) return;
+  double ratio = (double)(n->vertical ? p.y - r.top : p.x - r.left) / extent;
+  n->ratio = ratio < 0.1 ? 0.1 : ratio > 0.9 ? 0.9 : ratio;
+  layout(f);
+}
+
 // A pane closed (its surface went): its leaf leaves the tree, its sibling
 // takes the parent's place, and the tab's focus moves there. The tab's
 // last pane takes the tab with it (detach_tab, as before splits).
@@ -753,6 +812,7 @@ void pane_gone(Frame* f, Window* w) {
   int ti = tab_index(f, w);
   Node* parent = leaf->parent;
   Node* sibling = parent->a == leaf ? parent->b : parent->a;
+  if (f->drag == parent) f->drag = NULL;  // its divider goes with it
   sibling->parent = parent->parent;
   if (!parent->parent)
     t->root = sibling;
@@ -853,7 +913,16 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
       mouse_pos(w, lp);
       return 0;
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDOWN: {
+      // A press near a divider drags it (the terminal never sees it).
+      POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      MapWindowPoints(hwnd, w->frame->hwnd, &p, 1);
+      Node* d = divider_at(w->frame, p);
+      if (d) {
+        divider_drag_start(w->frame, d);
+        return 0;
+      }
+    }
       if (GetFocus() != hwnd) SetFocus(hwnd);  // a click picks the pane
       mouse_button(w, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT);
       return 0;
@@ -889,7 +958,12 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_SETCURSOR:
       if (LOWORD(lp) == HTCLIENT) {
-        SetCursor(LoadCursorW(NULL, IDC_IBEAM));
+        // Near a divider: the arrow that says it can be dragged.
+        POINT p;
+        GetCursorPos(&p);
+        ScreenToClient(w->frame->hwnd, &p);
+        Node* d = divider_at(w->frame, p);
+        SetCursor(LoadCursorW(NULL, d ? divider_cursor(d) : IDC_IBEAM));
         return TRUE;
       }
       break;

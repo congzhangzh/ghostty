@@ -164,6 +164,7 @@ struct Frame {
   // take (client pixels), and a tab pressed that may become a window drag.
   int buttons_w, buttons_h;
   WPARAM nc_pressed;  // a caption button pressed (HTCLOSE…) the host acts on
+  Node* drag;         // a split whose divider the mouse is dragging
   bool pressing;
   POINT press;
   HFONT font;
@@ -245,6 +246,10 @@ bool goto_split(Window* w, ghostty_action_goto_split_e to);
 bool resize_split(Window* w, ghostty_action_resize_split_s r);
 bool equalize_splits(Window* w);
 bool toggle_split_zoom(Window* w);
+Node* divider_at(Frame* f, POINT client);
+void divider_drag_start(Frame* f, Node* n);
+void divider_drag_to(Frame* f, POINT client);
+LPCWSTR divider_cursor(Node* n);
 void pane_gone(Frame* f, Window* w);
 void pane_focused(Window* w);
 int tab_panes(Tab* t, Window** out, int cap);
