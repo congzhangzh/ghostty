@@ -277,9 +277,10 @@ static void cmd_list(Line* b) {
   put(b, ",\"windows\":[");
   long wi = 0;
   for (Frame* f = g_frames; f; f = f->next, wi++) {
-    put(b, "%s{\"window\":%ld,\"active\":%s,\"fullscreen\":%s,\"maximized\":%s,\"rect\":",
+    put(b, "%s{\"window\":%ld,\"active\":%s,\"fullscreen\":%s,\"maximized\":%s,\"quick\":%s,\"visible\":%s,\"rect\":",
         wi ? "," : "", wi, GetForegroundWindow() == f->hwnd ? "true" : "false",
-        f->fullscreen ? "true" : "false", IsZoomed(f->hwnd) ? "true" : "false");
+        f->fullscreen && !f->quick ? "true" : "false", IsZoomed(f->hwnd) ? "true" : "false",
+        f->quick ? "true" : "false", IsWindowVisible(f->hwnd) ? "true" : "false");
     put_rect(b, f->hwnd);
     int pv = -1;
     const char* ps = notify_progress_state(f, &pv);  // notify.c: NULL for none

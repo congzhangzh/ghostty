@@ -148,6 +148,7 @@ void config_changed(ghostty_config_t config) {
   g_config = copy;
   ghostty_config_free(old);
   read_host_config();
+  quick_hotkey_update();  // its key may have changed
   for (Frame* f = g_frames; f; f = f->next) {
     layout(f);  // the title bar's colors (titlebar_update) and the bar
     InvalidateRect(f->hwnd, NULL, FALSE);
@@ -220,6 +221,7 @@ void color_scheme_apply(void) {
 
 static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_GHOSTTY_TESTCTL) return testctl_ui(lp);
+  if (msg == WM_HOTKEY && quick_hotkey(wp)) return 0;  // the quick terminal's key
   if (msg == WM_TIMER && wp == 7) {  // the stats period (stats.c)
     stats_tick_all();
     return 0;
@@ -314,6 +316,7 @@ int main(int argc, char** argv) {
   start_reports();
   stats_start();
   testctl_start();  // only with GHOSTTY_TEST_CONTROL=1
+  quick_hotkey_update();  // after the test pipe: its event is one
   if (!new_window(NULL)) {
     glcheck_explain();  // why, in a message box (glcheck.c)
     return 1;

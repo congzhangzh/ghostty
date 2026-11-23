@@ -8,7 +8,7 @@
 // for a foreground window that covers its monitor. Leaving restores the
 // placement saved on entry, maximized or not.
 void set_fullscreen(Frame* w, bool on) {
-  if (on == w->fullscreen) return;
+  if (on == w->fullscreen || w->quick) return;  // the quick terminal keeps its place
   LONG style = GetWindowLongW(w->hwnd, GWL_STYLE);
   if (on) {
     MONITORINFO mi = {sizeof(mi)};
@@ -350,9 +350,10 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     case WM_ACTIVATE:
       titlebar_update(f);
+      quick_activate(f, wp, lp);  // autohide (quick.c)
       break;
     case WM_TIMER:
-      if (theme_timer(f, wp)) return 0;
+      if (theme_timer(f, wp) || quick_timer(f, wp)) return 0;
       break;
     case WM_SETTINGCHANGE:
       // Windows' light/dark app mode changed: light:/dark: themes follow.
@@ -507,6 +508,7 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_NCDESTROY: {
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+      quick_gone(f);
       for (Frame** p = &g_frames; *p; p = &(*p)->next)
         if (*p == f) {
           *p = f->next;

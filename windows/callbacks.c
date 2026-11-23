@@ -300,6 +300,10 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       }
       return true;
 
+    case GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL:
+      quick_toggle();
+      return true;
+
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
       if (!f) return false;
       set_fullscreen(f, !f->fullscreen);

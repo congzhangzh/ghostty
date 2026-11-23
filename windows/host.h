@@ -28,6 +28,7 @@
 #define PSAPI_VERSION 2
 #include <dbghelp.h>
 #include <dwmapi.h>
+#include <shellscalingapi.h>
 #include <psapi.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
@@ -160,6 +161,7 @@ struct Frame {
 
   // Full screen: the placement to go back to when it ends.
   bool fullscreen;
+  bool quick;  // the quick terminal (quick.c): also fullscreen, for the caption-less path
   WINDOWPLACEMENT placement;
 
   bool destroying;  // DestroyWindow is taking its tabs down with it
@@ -302,6 +304,12 @@ void config_reload(ghostty_surface_t surface, bool soft);
 char* theme_config_file(void);
 int scheme_mode(void);
 void scheme_cycle(void);
+void quick_toggle(void);
+bool quick_timer(Frame* f, WPARAM id);
+void quick_activate(Frame* f, WPARAM wp, LPARAM lp);
+void quick_gone(Frame* f);
+void quick_hotkey_update(void);
+bool quick_hotkey(WPARAM id);
 const WCHAR* theme_hint(void);
 bool theme_timer(Frame* f, WPARAM id);
 void theme_menu_add(HMENU sys);
