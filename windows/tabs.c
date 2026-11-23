@@ -153,6 +153,7 @@ COLORREF bar_color(void) {
 bool bar_is_dark(void) { return is_dark(bar_color()); }
 
 static void draw_bar(Frame* f, HDC dc, int width, int b) {
+  f->slogan_shown = 0;
   COLORREF bar = bar_color();
   COLORREF hover = mix(bar, g_bg, 0.5);
   COLORREF line = mix(bar, g_fg, 0.12);
@@ -205,8 +206,8 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
   stroke(dc, cx - h, cy, cx + h + 1, cy, lw, dim);
   stroke(dc, cx, cy - h, cx, cy + h + 1, lw, dim);
 
-  // Ghostty's motto in the caption's empty part, dim, only when it fits
-  // whole (the tabs come first). GHOSTTY_SLOGAN=false turns it off.
+  // Ghostty's slogan or motto in the caption's empty part (below); off
+  // with GHOSTTY_SLOGAN=false.
   // A hint from the Theme menu's key takes its place for a few seconds.
   const WCHAR* hint = theme_hint();
   if (hint) {
@@ -215,13 +216,23 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
     DrawTextW(dc, hint, -1, &m,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
   } else if (titlebar_active(f) && slogan_shown()) {
-    RECT m = {xp + b + px(f, 16), 0, end, b};
-    RECT need = {0, 0, 0, 0};
-    DrawTextW(dc, kSlogan, -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-    if (need.right <= m.right - m.left) {
+    // As pys's status_gap: the gap between the + and the caption buttons
+    // gets the slogan, else the motto, whichever fits whole with 6 cells
+    // to spare, dim and centred; else it stays blank (many tabs, a narrow
+    // window). It only fills what the tabs left empty.
+    RECT gap = {xp + b, 0, end, b};
+    TEXTMETRICW tm;
+    GetTextMetricsW(dc, &tm);
+    int room = gap.right - gap.left - 6 * tm.tmAveCharWidth;
+    const WCHAR* const texts[] = {kSlogan, kMotto};
+    for (int i = 0; i < 2; i++) {
+      RECT need = {0, 0, 0, 0};
+      DrawTextW(dc, texts[i], -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+      if (need.right > room) continue;
       SetTextColor(dc, mix(dim, bar, 0.35));
-      DrawTextW(dc, kSlogan, -1, &m,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+      DrawTextW(dc, texts[i], -1, &gap, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+      f->slogan_shown = i == 0 ? 2 : 1;  // for the test pipe: 2 slogan, 1 motto
+      break;
     }
   }
 }

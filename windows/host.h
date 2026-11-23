@@ -168,6 +168,7 @@ struct Frame {
 
   // Full screen: the placement to go back to when it ends.
   bool fullscreen;
+  int slogan_shown;  // what the bar's gap showed last: 0 nothing, 1 the motto, 2 the slogan
   bool quick;  // the quick terminal (quick.c): also fullscreen, for the caption-less path
   WINDOWPLACEMENT placement;
 
