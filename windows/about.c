@@ -20,8 +20,13 @@
 #define GHOSTTY_FAMILY ""
 #endif
 
-#define GHOSTTY_MOTTO "one immersive terminal, many agent teams"
+// The owner's motto (2026-11-23: "many agent teams, one immersive
+// terminal"), in English everywhere, as in pys; the slogan is it and the
+// family line (GHOSTTY_FAMILY, from pys's about.py through the kit).
+#define GHOSTTY_MOTTO "many agent teams, one immersive terminal"
 const WCHAR* const kMotto = WIDEN(GHOSTTY_MOTTO);
+const WCHAR* const kSlogan =
+    sizeof(GHOSTTY_FAMILY) > 1 ? WIDEN(GHOSTTY_MOTTO) L" \u00b7 " WIDEN(GHOSTTY_FAMILY) : WIDEN(GHOSTTY_MOTTO);
 
 // GHOSTTY_SLOGAN=false hides the motto in the title bar (as pys's SLOGAN).
 bool slogan_shown(void) {

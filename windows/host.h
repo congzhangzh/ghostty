@@ -289,6 +289,7 @@ bool bar_is_dark(void);
 void titlebar_update(Frame* f);
 void show_window_menu(Frame* f, int x, int y);
 extern const WCHAR* const kMotto;
+extern const WCHAR* const kSlogan;  // the motto and the family line (about.c)
 bool slogan_shown(void);
 void about_menu_add(HWND hwnd);
 bool about_command(HWND hwnd, WPARAM wp);

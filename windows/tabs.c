@@ -217,10 +217,10 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
   } else if (titlebar_active(f) && slogan_shown()) {
     RECT m = {xp + b + px(f, 16), 0, end, b};
     RECT need = {0, 0, 0, 0};
-    DrawTextW(dc, kMotto, -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(dc, kSlogan, -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
     if (need.right <= m.right - m.left) {
       SetTextColor(dc, mix(dim, bar, 0.35));
-      DrawTextW(dc, kMotto, -1, &m,
+      DrawTextW(dc, kSlogan, -1, &m,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
   }
