@@ -311,6 +311,7 @@ void quick_gone(Frame* f);
 void quick_hotkey_update(void);
 bool quick_hotkey(WPARAM id);
 const WCHAR* theme_hint(void);
+void hint_show(const WCHAR* text);  // a line in the title bar for a few seconds (theme.c)
 bool theme_timer(Frame* f, WPARAM id);
 void theme_menu_add(HMENU sys);
 void theme_menu_update(HMENU sys);

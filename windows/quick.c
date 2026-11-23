@@ -275,6 +275,21 @@ static UINT trigger_vk(ghostty_input_trigger_s t) {
   }
 }
 
+// A key as Windows shows it: "Win+`", "Ctrl+Alt+T", "F12".
+static void key_name(UINT vk, UINT mods, WCHAR* out, size_t cap) {
+  WCHAR key[16];
+  UINT ch = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) & 0x7fffffff;
+  if (vk >= VK_F1 && vk <= VK_F24)
+    swprintf(key, 16, L"F%u", vk - VK_F1 + 1);
+  else if (ch)
+    swprintf(key, 16, L"%lc", (wint_t)towupper((wint_t)ch));
+  else
+    swprintf(key, 16, L"0x%02X", vk);
+  swprintf(out, cap, L"%ls%ls%ls%ls%ls", (mods & MOD_CONTROL) ? L"Ctrl+" : L"",
+           (mods & MOD_ALT) ? L"Alt+" : L"", (mods & MOD_SHIFT) ? L"Shift+" : L"",
+           (mods & MOD_WIN) ? L"Win+" : L"", key);
+}
+
 // (Re)register the global key from the config: at start and on each change.
 void quick_hotkey_update(void) {
   if (g_hotkey) {
@@ -296,11 +311,21 @@ void quick_hotkey_update(void) {
   snprintf(e, sizeof(e), "{\"kind\":\"quick\",\"what\":\"hotkey\",\"vk\":%u,\"mods\":%u,\"ok\":%s}",
            vk, mods & ~MOD_NOREPEAT, g_hotkey ? "true" : "false");
   test_event(e);
-  if (!g_hotkey)
-    fprintf(stderr,
-            "ghostty: the quick terminal's global key (vk 0x%02x, mods 0x%x) is taken by another "
-            "app (error %lu)\n",
-            vk, mods & ~MOD_NOREPEAT, GetLastError());
+  if (!g_hotkey) {
+    DWORD err = GetLastError();
+    WCHAR name[64];
+    key_name(vk, mods, name, 64);
+    fprintf(stderr, "ghostty: the quick terminal's global key %ls is taken by another app (error %lu)\n",
+            name, err);
+    // Once a run, in the title bar too, so he is not left guessing.
+    static bool said;
+    if (!said) {
+      said = true;
+      WCHAR text[160];
+      swprintf(text, 160, L"Quick Terminal key %ls is used by another app", name);
+      hint_show(text);
+    }
+  }
 }
 
 // WM_HOTKEY on the wakeup window.

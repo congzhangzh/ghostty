@@ -2867,6 +2867,10 @@ keybind: Keybinds = .{},
 @"quick-terminal-autohide": bool = switch (builtin.target.os.tag) {
     .linux => false,
     .macos => true,
+    // As on macOS: a global key is as easy to reach on Windows (the
+    // quick terminal comes back with Win+` from any app), so it goes away
+    // when another app takes the focus.
+    .windows => true,
     else => false,
 },
 
@@ -7206,6 +7210,19 @@ pub const Keybinds = struct {
                 .{ .key = .{ .unicode = ']' }, .mods = .{ .ctrl = true, .alt = true } },
                 .{ .goto_split = .next },
                 .{ .performable = true },
+            );
+
+            // The quick terminal on Win+`, from any app: the key Windows
+            // users know from Windows Terminal's quake mode. Upstream has
+            // no default global key (on Linux one needs system setup);
+            // Windows registers it for any app, as macOS does. If another
+            // app holds it (Windows Terminal, started first), the host
+            // says so; `keybind = global:super+grave_accent=unbind` frees it.
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .backquote }, .mods = .{ .super = true } },
+                .{ .toggle_quick_terminal = {} },
+                .{ .global = true },
             );
         }
 

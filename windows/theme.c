@@ -279,7 +279,7 @@ static WCHAR g_hint[200];
 
 const WCHAR* theme_hint(void) { return g_hint[0] ? g_hint : NULL; }
 
-static void hint_show(const WCHAR* text) {
+void hint_show(const WCHAR* text) {
   swprintf(g_hint, 200, L"%ls", text);
   for (Frame* f = g_frames; f; f = f->next) {
     SetTimer(f->hwnd, HINT_TIMER, 4000, NULL);

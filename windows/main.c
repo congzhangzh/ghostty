@@ -316,11 +316,11 @@ int main(int argc, char** argv) {
   start_reports();
   stats_start();
   testctl_start();  // only with GHOSTTY_TEST_CONTROL=1
-  quick_hotkey_update();  // after the test pipe: its event is one
   if (!new_window(NULL)) {
     glcheck_explain();  // why, in a message box (glcheck.c)
     return 1;
   }
+  quick_hotkey_update();  // after the test pipe and a window: its event, its hint
   whatsnew_once(g_frames->hwnd);  // after an upgrade, once
 
   // To prove the reports, 3 seconds after start: GHOSTTY_TEST_HANG=<seconds>
