@@ -294,36 +294,77 @@ static void toasts_init(void) {
   g_toasts = g_notifier ? 1 : 0;
 }
 
-// `s` (UTF-8) escaped for XML text, appended to the wide buffer `out` (cap WCHARs).
-static void xml_append(WCHAR* out, size_t cap, const char* s) {
-  WCHAR* w = s && *s ? utf8_to_utf16(s, -1) : NULL;
-  size_t o = wcslen(out);
-  for (const WCHAR* p = w; p && *p && o + 8 < cap; p++) {
-    const WCHAR* e = *p == L'&' ? L"&amp;" : *p == L'<' ? L"&lt;" : *p == L'>' ? L"&gt;" : *p == L'"' ? L"&quot;" : NULL;
-    if (e) { wcscpy(out + o, e); o += wcslen(e); }
-    else if (*p >= 0x20 || *p == L'\n' || *p == L'\t') out[o++] = *p;
+// A growing wide string for the toast's XML: the text in it comes from programs (OSC 9 and
+// OSC 777 bodies), so it is never written into a fixed buffer.
+typedef struct {
+  WCHAR* p;
+  size_t n, cap;
+  bool failed;
+} WBuf;
+
+static void wb_add(WBuf* b, const WCHAR* s, size_t len) {
+  if (b->failed) return;
+  if (b->n + len + 1 > b->cap) {
+    size_t cap = b->cap ? b->cap : 512;
+    while (b->n + len + 1 > cap) cap *= 2;
+    WCHAR* p = realloc(b->p, cap * sizeof(WCHAR));
+    if (!p) {
+      b->failed = true;
+      return;
+    }
+    b->p = p;
+    b->cap = cap;
   }
-  out[o] = 0;
+  memcpy(b->p + b->n, s, len * sizeof(WCHAR));
+  b->n += len;
+  b->p[b->n] = 0;
+}
+
+static void wb_tag(WBuf* b, const WCHAR* s) { wb_add(b, s, wcslen(s)); }
+
+// UTF-8 `s` as XML text, at most `limit` UTF-16 units of it (a toast shows a few lines; the
+// rest is cut, never a pair of surrogates in half), control characters but tab and newline left
+// out.
+static void wb_text(WBuf* b, const char* s, size_t limit) {
+  WCHAR* w = s && *s ? utf8_to_utf16(s, -1) : NULL;
+  size_t len = w ? wcslen(w) : 0;
+  if (len > limit) {
+    len = limit;
+    if (len && w[len - 1] >= 0xD800 && w[len - 1] <= 0xDBFF) len--;
+  }
+  for (size_t i = 0; i < len; i++) {
+    WCHAR c = w[i];
+    if (c == L'&') wb_tag(b, L"&amp;");
+    else if (c == L'<') wb_tag(b, L"&lt;");
+    else if (c == L'>') wb_tag(b, L"&gt;");
+    else if (c == L'"') wb_tag(b, L"&quot;");
+    else if (c >= 0x20 || c == L'\n' || c == L'\t') wb_add(b, &c, 1);
+  }
   free(w);
 }
 
 // The toast: title, body, and the tab's title as the attribution line (macOS shows it as the
 // subtitle). Returns the HRESULT; on a failure the caller shows a balloon instead.
 static HRESULT toast_show(Window* w, const char* title, const char* body) {
-  static WCHAR xml[4096];
-  wcscpy(xml, L"<toast><visual><binding template=\"ToastGeneric\"><text>");
-  xml_append(xml, 4096, title && *title ? title : "Ghostty");
-  wcscat(xml, L"</text><text>");
-  xml_append(xml, 4096, body);
-  wcscat(xml, L"</text>");
+  WBuf x = {0};
+  wb_tag(&x, L"<toast><visual><binding template=\"ToastGeneric\"><text>");
+  wb_text(&x, title && *title ? title : "Ghostty", 256);
+  wb_tag(&x, L"</text><text>");
+  wb_text(&x, body, 2048);
+  wb_tag(&x, L"</text>");
   if (w->title && *w->title) {
     char* t = utf16_to_utf8(w->title, -1);
-    wcscat(xml, L"<text placement=\"attribution\">");
-    xml_append(xml, 4096, t);
-    wcscat(xml, L"</text>");
+    wb_tag(&x, L"<text placement=\"attribution\">");
+    wb_text(&x, t, 256);
+    wb_tag(&x, L"</text>");
     free(t);
   }
-  wcscat(xml, L"</binding></visual></toast>");
+  wb_tag(&x, L"</binding></visual></toast>");
+  if (x.failed || !x.p) {
+    free(x.p);
+    return E_OUTOFMEMORY;
+  }
+  const WCHAR* xml = x.p;
 
   HSTRING cls_doc = NULL, cls_toast = NULL, hxml = NULL;
   void* insp = NULL;
@@ -360,6 +401,7 @@ static HRESULT toast_show(Window* w, const char* title, const char* body) {
   if (io) io->v->h.Release(io);
   if (insp) ((IInspectableVtblHead*)*(void**)insp)->Release(insp);
   if (hxml) g_ro.DeleteString(hxml);
+  free(x.p);
   if (cls_toast) g_ro.DeleteString(cls_toast);
   if (cls_doc) g_ro.DeleteString(cls_doc);
   return hr;
