@@ -36,10 +36,20 @@ typedef struct {
   uint64_t seq;
 } IpcInstance;
 
+// A TOKEN_USER and the SID after it. Aligned as TOKEN_USER (it holds a
+// pointer): Windows refuses a misaligned buffer with ERROR_NOACCESS (998);
+// Wine does not check, so a BYTE array passed every Wine test and failed
+// on every real Windows (the stats pipe off, every test-pipe client
+// refused).
+typedef union {
+  TOKEN_USER tu;
+  BYTE bytes[256];
+} TokenUserBuf;
+
 static struct {
   bool on;
   WCHAR name[64];
-  BYTE user[256];  // TOKEN_USER of this process
+  TokenUserBuf user;  // this process's
   PSECURITY_DESCRIPTOR sd;
   SECURITY_ATTRIBUTES sa;
   HANDLE wake;
@@ -52,30 +62,40 @@ static struct {
   int nreaders;
 } g_ipc;
 
-static bool token_user(HANDLE process, BYTE* buf, DWORD cap) {
+static bool token_user(HANDLE process, TokenUserBuf* buf) {
   HANDLE token = NULL;
   if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return false;
   DWORD size = 0;
-  BOOL ok = GetTokenInformation(token, TokenUser, buf, cap, &size);
+  BOOL ok = GetTokenInformation(token, TokenUser, buf, sizeof(*buf), &size);
+  DWORD err = GetLastError();
   CloseHandle(token);
+  SetLastError(err);
   return ok != FALSE;
 }
 
-static PSID sid_of(BYTE* token_user_buf) {
-  return ((TOKEN_USER*)token_user_buf)->User.Sid;
-}
+static PSID sid_of(TokenUserBuf* buf) { return buf->tu.User.Sid; }
 
 // The process at the other end of the pipe runs as us.
+// A refusal is said on stderr with its reason (it was silent once).
 static bool same_user(HANDLE pipe) {
   ULONG pid = 0;
-  if (!GetNamedPipeClientProcessId(pipe, &pid)) return false;
-  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (!process) return false;
-  BYTE buf[256];
-  bool ok = token_user(process, buf, sizeof(buf)) &&
-            EqualSid(sid_of(buf), sid_of(g_ipc.user));
-  CloseHandle(process);
-  return ok;
+  const char* why = NULL;
+  DWORD err = 0;
+  HANDLE process = NULL;
+  TokenUserBuf buf;
+  if (!GetNamedPipeClientProcessId(pipe, &pid))
+    why = "no client process id";
+  else if (!(process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)))
+    why = "cannot open the client process";
+  else if (!token_user(process, &buf))
+    why = "cannot read the client's user";
+  else if (!EqualSid(sid_of(&buf), sid_of(&g_ipc.user)))
+    why = "another user";
+  if (why) err = GetLastError();
+  if (process) CloseHandle(process);
+  if (why)
+    fprintf(stderr, "ghostty: pipe client (pid %lu) refused: %s (error %lu)\n", pid, why, err);
+  return !why;
 }
 
 static void close_instance(IpcInstance* in) {
@@ -221,13 +241,12 @@ bool stats_ipc_on(void) { return g_ipc.on; }
 // For another pipe (the test-control one): the same guard, an access list
 // of this user and SYSTEM (the security descriptor lives for the process).
 bool pipe_security(SECURITY_ATTRIBUTES* sa) {
-  static BYTE user[256];
+  static TokenUserBuf user;
   static PSECURITY_DESCRIPTOR sd;
   if (!sd) {
     LPWSTR sid = NULL;
     WCHAR sddl[256];
-    if (!token_user(GetCurrentProcess(), user, sizeof(user)) ||
-        !ConvertSidToStringSidW(sid_of(user), &sid))
+    if (!token_user(GetCurrentProcess(), &user) || !ConvertSidToStringSidW(sid_of(&user), &sid))
       return false;
     swprintf(sddl, sizeof(sddl) / sizeof(WCHAR), L"D:P(A;;GA;;;%ls)(A;;GA;;;SY)", sid);
     LocalFree(sid);
@@ -244,8 +263,7 @@ bool pipe_security(SECURITY_ATTRIBUTES* sa) {
 // The client of a pipe runs as this user (g_ipc.user is set by
 // stats_ipc_start; the test pipe fills it itself when that one is off).
 bool pipe_client_same_user(HANDLE pipe) {
-  if (!((TOKEN_USER*)g_ipc.user)->User.Sid &&
-      !token_user(GetCurrentProcess(), g_ipc.user, sizeof(g_ipc.user)))
+  if (!g_ipc.user.tu.User.Sid && !token_user(GetCurrentProcess(), &g_ipc.user))
     return false;
   return same_user(pipe);
 }
@@ -260,8 +278,8 @@ void stats_ipc_start(void) {
   const char* fail = NULL;
   LPWSTR sid = NULL;
   WCHAR sddl[256];
-  if (!token_user(GetCurrentProcess(), g_ipc.user, sizeof(g_ipc.user)) ||
-      !ConvertSidToStringSidW(sid_of(g_ipc.user), &sid)) {
+  if (!token_user(GetCurrentProcess(), &g_ipc.user) ||
+      !ConvertSidToStringSidW(sid_of(&g_ipc.user), &sid)) {
     fail = "this process's user";
   } else {
     swprintf(sddl, sizeof(sddl) / sizeof(WCHAR), L"D:P(A;;GA;;;%ls)(A;;GA;;;SY)",
