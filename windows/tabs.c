@@ -886,6 +886,8 @@ void close_tab(Window* w) {
 LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   Window* w = (Window*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
   if (!w || !w->surface) return DefWindowProcW(hwnd, msg, wp, lp);
+  LRESULT ime_result;
+  if (ime_message(w, msg, wp, lp, &ime_result)) return ime_result;
 
   switch (msg) {
     case WM_KEYDOWN:
@@ -898,17 +900,12 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (wp == VK_F12 && (GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
           !(GetKeyState(VK_MENU) & 0x8000)) {
         if (!(lp & (1 << 30))) scheme_cycle();  // not on auto-repeat
-        w->ate_f12 = true;
-        return 0;
+        return 0;  // its release is kept back too (input.c's pressed)
       }
       handle_key(w, msg, wp, lp);
       return 0;
     case WM_KEYUP:
     case WM_SYSKEYUP:
-      if (wp == VK_F12 && w->ate_f12) {
-        w->ate_f12 = false;
-        return 0;
-      }
       handle_key(w, msg, wp, lp);
       if (msg == WM_SYSKEYUP && wp == VK_MENU) return 0;  // no menu focus
       break;
@@ -1017,6 +1014,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       notify_tab_closed(w);
       pane_gone(f, w);
       free(w->title);
+      free(w->ime_preedit);
       free(w->bgra);
       free(w);
       return 0;

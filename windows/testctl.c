@@ -12,7 +12,7 @@
 //
 // A request is one JSON line, the answer one JSON line, in order; a client
 // may send many. Commands (protocol 1, agreed with the e2e driver):
-//   hello, list, text, key, action, read, screenshot, stats, window, events, menu
+//   hello, list, text, key, action, read, screenshot, stats, window, events, menu, ime
 // They run on the UI thread (posted to the wakeup window, answered within
 // 5 s or "ui timeout"); a screenshot is then taken from the screen by the
 // pipe's thread, after a frame, so it shows what was presented in either
@@ -571,6 +571,14 @@ LRESULT testctl_ui(LPARAM lp) {
       free(a);
     } else if (strcmp(cmd, "read") == 0) {
       ok = cmd_read(w, b);
+    } else if (strcmp(cmd, "ime") == 0) {
+      // {"cmd":"ime","comp":"…","commit":"complete"|"cancel"}: drive the
+      // pane's input context as an IME would (ime.c).
+      char* comp = jstr(&o, "comp");
+      char* commit = jstr(&o, "commit");
+      ime_drive(w, comp, commit ? (strcmp(commit, "cancel") == 0 ? 0 : 1) : -1, b);
+      free(comp);
+      free(commit);
     } else if (strcmp(cmd, "screenshot") == 0) {
       char* t = jstr(&o, "target");
       HWND h = w->hwnd;
@@ -873,7 +881,15 @@ bool ctl_client_mode(int argc, char** argv, int* rc) {
     return false;
   *rc = 1;
   DWORD pid = 0;
-  const char* req = argv[argc - 1];
+  // The request in UTF-8 from the wide command line: argv is in the ANSI
+  // code page, where 中文 or 日本語 become "??".
+  char* req = NULL;
+  int wargc = 0;
+  LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+  if (wargv && wargc == argc) req = utf16_to_utf8(wargv[wargc - 1], -1);
+  if (wargv) LocalFree(wargv);
+  if (!req) req = _strdup(argv[argc - 1]);
+  if (!req) return true;
   if (argc > 3) pid = strtoul(argv[2], NULL, 10);
   if (!pid) {
     // The one Ghostty with a test-control pipe.
@@ -913,6 +929,7 @@ bool ctl_client_mode(int argc, char** argv, int* rc) {
   DWORD n;
   WriteFile(p, req, (DWORD)strlen(req), &n, NULL);
   WriteFile(p, "\n", 1, &n, NULL);
+  free(req);  // (the early returns above end the process anyway)
   HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
   char buf[65536];
   while (ReadFile(p, buf, sizeof(buf), &n, NULL) && n) {

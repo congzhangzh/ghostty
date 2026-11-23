@@ -67,6 +67,22 @@ void handle_key(Window* w, UINT msg, WPARAM vk, LPARAM lp) {
   bool up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
   bool repeat = !up && (lp & (1 << 30));
 
+  // A release only after a press Ghostty got: the keys an IME took
+  // (VK_PROCESSKEY, above) and the host's own (Ctrl+Shift+F12) come back
+  // up as the real key, which would be a release out of nowhere for a
+  // program asking for releases (the kitty keyboard protocol). Scan code 0
+  // (synthetic input) is not tracked.
+  uint32_t sc = ((uint32_t)(lp >> 16) & 0xff) | ((lp & (1 << 24)) ? 0x100 : 0);
+  uint8_t bit = (uint8_t)(1u << (sc & 7));
+  if (sc & 0xff) {
+    if (up) {
+      if (!(w->pressed[sc >> 3] & bit)) return;
+      w->pressed[sc >> 3] &= (uint8_t)~bit;
+    } else {
+      w->pressed[sc >> 3] |= bit;
+    }
+  }
+
   ghostty_input_key_s key = {0};
   key.action = up ? GHOSTTY_ACTION_RELEASE
                   : (repeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS);

@@ -121,7 +121,14 @@ struct Window {
   // The renderer draws into this window itself (GHOSTTY_PRESENT=swap):
   // frames come without pixels, and the host paints nothing over them.
   bool swap;
-  bool ate_f12;  // Ctrl+Shift+F12 went to the host: its release too
+  // IME (ime.c): composing, the preedit Ghostty draws, the cursor point
+  // the candidates were placed at (pixels, the pane's).
+  bool ime_composing;
+  char* ime_preedit;
+  int ime_x, ime_y;
+  // The keys whose press Ghostty got, by scan code (0x100: extended): a
+  // release goes only after its press (input.c).
+  uint8_t pressed[64];
 
   // A high surrogate from WM_CHAR waiting for its low half.
   WCHAR high_surrogate;
@@ -209,6 +216,7 @@ char* utf16_to_utf8(const WCHAR* s, int len);
 WCHAR* utf8_to_utf16(const char* s, int len);
 void handle_key(Window* w, UINT msg, WPARAM vk, LPARAM lp);
 void handle_char(Window* w, WCHAR ch);
+bool ime_message(Window* w, UINT msg, WPARAM wp, LPARAM lp, LRESULT* out);
 void mouse_pos(Window* w, LPARAM lp);
 void mouse_button(Window* w, ghostty_input_mouse_state_e state,
                          ghostty_input_mouse_button_e button);
@@ -287,6 +295,7 @@ void testctl_start(void);
 bool ctl_client_mode(int argc, char** argv, int* rc);
 LRESULT testctl_ui(LPARAM req);
 void test_event(const char* json_object);
+void ime_drive(Window* w, const char* comp, int commit, Line* b);
 ghostty_config_t config_load_with(const char* theme_file);
 void config_reload(ghostty_surface_t surface, bool soft);
 char* theme_config_file(void);
