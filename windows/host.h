@@ -104,6 +104,7 @@ typedef enum {
 
 // A tab: a child window of its Frame, with one surface drawing into it.
 struct Window {
+  int id;  // never reused in this process (the test-control pipe's "pane")
   Frame* frame;
   Tab* tab;    // the tab this pane is in (shared by its panes)
   Node* node;  // its leaf in the tab's tree
@@ -264,6 +265,21 @@ bool about_command(HWND hwnd, WPARAM wp);
 void show_about(HWND owner);
 void show_whatsnew(HWND owner);
 void whatsnew_once(HWND owner);
+// A growing string (stats.c): JSON lines for the stats and test pipes.
+typedef struct {
+  char* p;
+  size_t len, cap;
+} Line;
+void put(Line* b, const char* fmt, ...);
+void put_string(Line* b, const char* s);
+void stats_json(Line* b);
+bool pipe_security(SECURITY_ATTRIBUTES* sa);
+bool pipe_client_same_user(HANDLE pipe);
+#define WM_GHOSTTY_TESTCTL (WM_APP + 3)  // a test-control request (testctl.c)
+void testctl_start(void);
+bool ctl_client_mode(int argc, char** argv, int* rc);
+LRESULT testctl_ui(LPARAM req);
+void test_event(const char* json_object);
 void stats_start(void);
 void stats_tick_all(void);
 void set_stats(Frame* f, bool on);

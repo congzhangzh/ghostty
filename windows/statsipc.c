@@ -218,6 +218,38 @@ static DWORD WINAPI ipc_main(void* arg) {
 
 bool stats_ipc_on(void) { return g_ipc.on; }
 
+// For another pipe (the test-control one): the same guard, an access list
+// of this user and SYSTEM (the security descriptor lives for the process).
+bool pipe_security(SECURITY_ATTRIBUTES* sa) {
+  static BYTE user[256];
+  static PSECURITY_DESCRIPTOR sd;
+  if (!sd) {
+    LPWSTR sid = NULL;
+    WCHAR sddl[256];
+    if (!token_user(GetCurrentProcess(), user, sizeof(user)) ||
+        !ConvertSidToStringSidW(sid_of(user), &sid))
+      return false;
+    swprintf(sddl, sizeof(sddl) / sizeof(WCHAR), L"D:P(A;;GA;;;%ls)(A;;GA;;;SY)", sid);
+    LocalFree(sid);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1,
+                                                              &sd, NULL))
+      return false;
+  }
+  sa->nLength = sizeof(*sa);
+  sa->lpSecurityDescriptor = sd;
+  sa->bInheritHandle = FALSE;
+  return true;
+}
+
+// The client of a pipe runs as this user (g_ipc.user is set by
+// stats_ipc_start; the test pipe fills it itself when that one is off).
+bool pipe_client_same_user(HANDLE pipe) {
+  if (!((TOKEN_USER*)g_ipc.user)->User.Sid &&
+      !token_user(GetCurrentProcess(), g_ipc.user, sizeof(g_ipc.user)))
+    return false;
+  return same_user(pipe);
+}
+
 // Opens \\.\pipe\ghostty-<pid>.stats unless GHOSTTY_STATS_IPC=off. A failure
 // is said on stderr and the host runs without it.
 void stats_ipc_start(void) {

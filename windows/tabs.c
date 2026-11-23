@@ -467,8 +467,10 @@ void size_tab(Window* w) {
 // a tab.
 static Window* new_pane(Frame* f, ghostty_surface_t from,
                         ghostty_surface_context_e context) {
+  static int next_id;
   Window* w = calloc(1, sizeof(Window));
   if (!w) return NULL;
+  w->id = ++next_id;
   w->frame = f;
   w->scale = f->scale;
   w->hwnd = CreateWindowExW(0, kTerminalClass, L"", WS_CHILD | WS_CLIPSIBLINGS,
@@ -528,6 +530,9 @@ Window* new_tab(Frame* f, ghostty_surface_t from,
   layout(f);
   size_tab(w);
   select_tab(f, tab_index(f, w));
+  char ev[96];
+  snprintf(ev, sizeof(ev), "{\"kind\":\"tab_opened\",\"pane\":%d}", w->id);
+  test_event(ev);
   return w;
 }
 
@@ -735,6 +740,10 @@ bool toggle_split_zoom(Window* w) {
 void pane_gone(Frame* f, Window* w) {
   Tab* t = w->tab;
   Node* leaf = w->node;
+  char ev[96];
+  snprintf(ev, sizeof(ev), "{\"kind\":\"%s\",\"pane\":%d}",
+           leaf && leaf->parent ? "pane_closed" : "tab_closed", w->id);
+  test_event(ev);
   if (!t || !leaf || !leaf->parent) {
     detach_tab(f, w);
     free(leaf);

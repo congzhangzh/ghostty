@@ -78,13 +78,7 @@ static void frame_tick(Frame* f, double dt_ms) {
   if (f->stats && w) InvalidateRect(w->hwnd, NULL, FALSE);
 }
 
-// A growing string for the pipe's line.
-typedef struct {
-  char* p;
-  size_t len, cap;
-} Line;
-
-static void put(Line* b, const char* fmt, ...) {
+void put(Line* b, const char* fmt, ...) {
   va_list ap;
   for (;;) {
     size_t room = b->cap - b->len;
@@ -105,7 +99,7 @@ static void put(Line* b, const char* fmt, ...) {
 }
 
 // A JSON string: quotes, backslashes and control characters escaped.
-static void put_string(Line* b, const char* s) {
+void put_string(Line* b, const char* s) {
   put(b, "\"");
   for (; s && *s; s++) {
     unsigned char c = (unsigned char)*s;
@@ -119,12 +113,14 @@ static void put_string(Line* b, const char* s) {
   put(b, "\"");
 }
 
-static void publish_line(void) {
-  Line b = {0};
+// The stats line (seq the last published one): the pipe's, and the test
+// pipe's "stats" command.
+void stats_json(Line* b0) {
+  Line b = *b0;
   put(&b,
       "{\"seq\":%llu,\"t_ms\":%.1f,\"period_ms\":%.1f,\"pid\":%lu,"
       "\"build\":",
-      (unsigned long long)++g_stats_seq,
+      (unsigned long long)g_stats_seq,
       (double)(g_stats_qpc - g_stats_start_qpc) * g_qpc_ms, g_period_ms,
       GetCurrentProcessId());
   put_string(&b, GHOSTTY_BUILD_TAG);
@@ -157,6 +153,13 @@ static void publish_line(void) {
     put(&b, "]}");
   }
   put(&b, "]}");
+  *b0 = b;
+}
+
+static void publish_line(void) {
+  Line b = {0};
+  ++g_stats_seq;
+  stats_json(&b);
   if (b.p) stats_ipc_publish(b.p, b.len);
   free(b.p);
 }

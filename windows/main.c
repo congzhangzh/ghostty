@@ -97,6 +97,7 @@ static void read_host_config(void) {
 }
 
 static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (msg == WM_GHOSTTY_TESTCTL) return testctl_ui(lp);
   if (msg == WM_TIMER && wp == 7) {  // the stats period (stats.c)
     stats_tick_all();
     return 0;
@@ -124,6 +125,7 @@ int main(int argc, char** argv) {
   if (!getenv("GHOSTTY_PRESENT")) _putenv("GHOSTTY_PRESENT=swap");
 #endif
   if (stats_client_mode(argc, argv, &rc)) return rc;
+  if (ctl_client_mode(argc, argv, &rc)) return rc;
   stderr_guard_start();
   g_main_tid = GetCurrentThreadId();
   LARGE_INTEGER freq;
@@ -196,6 +198,7 @@ int main(int argc, char** argv) {
 
   start_reports();
   stats_start();
+  testctl_start();  // only with GHOSTTY_TEST_CONTROL=1
   if (!new_window(NULL)) {
     glcheck_explain();  // why, in a message box (glcheck.c)
     return 1;

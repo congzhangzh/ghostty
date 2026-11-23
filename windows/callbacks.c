@@ -127,6 +127,12 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
         w->title = t;
         if (f->active >= 0 && f->tabs[f->active] == w) update_title(f);
         invalidate_bar(f);
+        Line e = {0};  // for the test-control pipe's events
+        put(&e, "{\"kind\":\"title\",\"pane\":%d,\"title\":", w->id);
+        put_string(&e, action.action.set_title.title);
+        put(&e, "}");
+        test_event(e.p);
+        free(e.p);
       }
       return true;
     }
