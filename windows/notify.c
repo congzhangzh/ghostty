@@ -1,9 +1,11 @@
 // Desktop notifications (OSC 9, OSC 777, OSC 99) and taskbar progress (OSC 9;4).
 //
-// A notification is a balloon from a notification-area icon that exists only while the
-// balloon is up. Windows 10 and 11 show a balloon as a toast and keep it in the notification
-// center, with no AppUserModelID or Start-menu shortcut needed (a WinRT toast needs both, so
-// it waits for an installer). It is not shown when it comes from the selected tab of the
+// A notification is a WinRT toast when Ghostty was installed (the installer's Start-menu
+// shortcut carries the AppUserModelID GhosttyForWindows.Ghostty, which this process then takes,
+// so Windows shows the toast as Ghostty's, with its name and icon, and keeps it in the
+// notification center). Otherwise, or when the toast fails, it is a balloon from a
+// notification-area icon that exists only while the balloon is up (Windows 10 and 11 show
+// that as a toast too, under the icon's name). It is not shown when it comes from the selected tab of the
 // foreground window, as on macOS (shown unless its window is the key window and its surface is
 // focused). A click on it brings that window forward and selects that tab. The core already
 // drops notifications when `desktop-notifications = false`.
@@ -18,8 +20,12 @@
 #include "host.h"
 
 #include <shobjidl.h>
+#include <roapi.h>
+#include <winstring.h>
 
 #define WM_NOTIFY_ICON (WM_APP + 41)
+#define WM_TOAST_CLICK (WM_APP + 42)
+#define GHOSTTY_AUMID L"GhosttyForWindows.Ghostty"
 #define NOTIFY_ICON_ID 1
 
 // CLSID_TaskbarList and IID_ITaskbarList3, declared here so the host needs no uuid library.
@@ -33,15 +39,44 @@ static Window* g_toast_tab;  // the tab the shown balloon is from, NULL once it 
 // ---------------------------------------------------------------------------
 // Where a tab is
 
+// `w` is a pane: the tab it is in (tab_index knows split panes; f->tabs[i] is only a tab's
+// focused pane).
 static bool find_tab(Window* w, Frame** fo, int* io) {
-  for (Frame* f = g_frames; f; f = f->next)
-    for (int i = 0; i < f->ntabs; i++)
-      if (f->tabs[i] == w) {
-        *fo = f;
-        *io = i;
-        return true;
-      }
+  for (Frame* f = g_frames; f; f = f->next) {
+    int i = tab_index(f, w);
+    if (i >= 0) {
+      *fo = f;
+      *io = i;
+      return true;
+    }
+  }
   return false;
+}
+
+// Is `w` still a pane of tab `i` of `f`? (A click can come after it closed.)
+static bool pane_alive(Frame* f, int i, Window* w) {
+  if (f->tabs[i] == w) return true;
+  Window* panes[64];
+  int n = f->tabs[i]->tab ? tab_panes(f->tabs[i]->tab, panes, 64) : 0;
+  for (int k = 0; k < n && k < 64; k++)
+    if (panes[k] == w) return true;
+  return false;
+}
+
+// Bring `w` forward, as a click on its notification does on macOS: its window, its tab, and
+// the pane itself focused.
+static void show_pane(Window* w, const char* why) {
+  Frame* f;
+  int i;
+  if (w && find_tab(w, &f, &i)) {
+    fprintf(stderr, "ghostty: notify: %s, showing its window and tab %d\n", why, i);
+    if (IsIconic(f->hwnd)) ShowWindow(f->hwnd, SW_RESTORE);
+    SetForegroundWindow(f->hwnd);
+    select_tab(f, i);
+    if (f->tabs[i] != w && pane_alive(f, i, w)) SetFocus(w->hwnd);
+  } else {
+    fprintf(stderr, "ghostty: notify: %s, but its tab is closed\n", why);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -54,25 +89,20 @@ static void icon_remove(void) {
   g_icon_shown = false;
 }
 
+static Window* pane_by_id(int id);
 static LRESULT CALLBACK notify_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (msg == WM_TOAST_CLICK) {
+    show_pane(pane_by_id((int)wp), "toast clicked");
+    return 0;
+  }
   if (msg == WM_NOTIFY_ICON) {
     // NOTIFYICON_VERSION_4: the event is in LOWORD(lParam).
     switch (LOWORD(lp)) {
-      case NIN_BALLOONUSERCLICK: {
-        Frame* f;
-        int i;
-        if (g_toast_tab && find_tab(g_toast_tab, &f, &i)) {
-          fprintf(stderr, "ghostty: notify: clicked, showing its window and tab %d\n", i);
-          if (IsIconic(f->hwnd)) ShowWindow(f->hwnd, SW_RESTORE);
-          SetForegroundWindow(f->hwnd);
-          select_tab(f, i);
-        } else {
-          fprintf(stderr, "ghostty: notify: clicked, but its tab is closed\n");
-        }
+      case NIN_BALLOONUSERCLICK:
+        show_pane(g_toast_tab, "clicked");
         g_toast_tab = NULL;
         icon_remove();
         return 0;
-      }
       case NIN_BALLOONTIMEOUT:
       case NIN_BALLOONHIDE:
         g_toast_tab = NULL;
@@ -93,6 +123,246 @@ static bool notify_window(void) {
   g_notify_hwnd = CreateWindowExW(0, L"GhosttyNotify", L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, g_inst, NULL);
   if (!g_notify_hwnd) fprintf(stderr, "ghostty: notify: no window for the notification icon (error %lu)\n", GetLastError());
   return g_notify_hwnd != NULL;
+}
+
+// ---------------------------------------------------------------------------
+// WinRT toasts (Windows.UI.Notifications), through their COM interfaces: mingw has no
+// windows.ui.notifications.h, so the few interfaces used are declared here. A toast needs an
+// AppUserModelID that a Start-menu shortcut carries (Windows ignores toasts from an app it
+// cannot name), so it is used only when the installer's shortcut is there.
+
+
+typedef struct IInspectableVtblHead {
+  HRESULT(STDMETHODCALLTYPE* QueryInterface)(void*, REFIID, void**);
+  ULONG(STDMETHODCALLTYPE* AddRef)(void*);
+  ULONG(STDMETHODCALLTYPE* Release)(void*);
+  void* GetIids;
+  void* GetRuntimeClassName;
+  void* GetTrustLevel;
+} IInspectableVtblHead;
+
+typedef struct { const struct {
+  IInspectableVtblHead h;
+  void* CreateToastNotifier;
+  HRESULT(STDMETHODCALLTYPE* CreateToastNotifierWithId)(void*, HSTRING, void**);
+} * v; } ToastManagerStatics;
+typedef struct { const struct {
+  IInspectableVtblHead h;
+  HRESULT(STDMETHODCALLTYPE* Show)(void*, void*);
+} * v; } ToastNotifier;
+typedef struct { const struct {
+  IInspectableVtblHead h;
+  HRESULT(STDMETHODCALLTYPE* CreateToastNotification)(void*, void*, void**);
+} * v; } ToastFactory;
+typedef struct { const struct {
+  IInspectableVtblHead h;
+  HRESULT(STDMETHODCALLTYPE* LoadXml)(void*, HSTRING);
+} * v; } XmlDocumentIO;
+typedef struct { const struct {
+  IInspectableVtblHead h;
+  void* get_Content;
+  void* put_ExpirationTime;
+  void* get_ExpirationTime;
+  void* add_Dismissed;
+  void* remove_Dismissed;
+  HRESULT(STDMETHODCALLTYPE* add_Activated)(void*, void*, INT64*);
+} * v; } ToastNotification;
+
+// Windows.UI.Notifications and Windows.Data.Xml.Dom, from the Windows SDK's metadata.
+static const IID kIidToastManagerStatics = {0x50ac103f, 0xd235, 0x4598, {0xbb, 0xef, 0x98, 0xfe, 0x4d, 0x1a, 0x3a, 0xd4}};
+static const IID kIidToastFactory = {0x04124b20, 0x82c6, 0x4229, {0xb1, 0x09, 0xfd, 0x9e, 0xd4, 0x66, 0x2b, 0x53}};
+static const IID kIidXmlDocumentIO = {0x6cd0e74e, 0xee65, 0x4489, {0x9e, 0xbf, 0xca, 0x43, 0xe8, 0x7b, 0xa6, 0x37}};
+static const IID kIidXmlDocument = {0xf7f3a506, 0x1e87, 0x42d6, {0xbc, 0xfb, 0xb8, 0xc8, 0x09, 0xfa, 0x54, 0x94}};
+// TypedEventHandler<ToastNotification, IInspectable> (ToastNotification.Activated)
+static const IID kIidActivatedHandler = {0xab54de2d, 0x97d9, 0x5528, {0xb6, 0xad, 0x10, 0x5a, 0xfe, 0x15, 0x65, 0x30}};
+static const IID kIidAgileObject = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
+static const IID kIidUnknown = {0x00000000, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+
+static int g_toasts = -1;  // -1 not decided, 0 balloons only, 1 toasts
+
+// combase.dll's WinRT functions, loaded when toasts are first wanted: the host links no WinRT
+// import library, and a Windows without them keeps balloons.
+static struct {
+  HRESULT(WINAPI* Initialize)(RO_INIT_TYPE);
+  HRESULT(WINAPI* GetActivationFactory)(HSTRING, REFIID, void**);
+  HRESULT(WINAPI* ActivateInstance)(HSTRING, void**);
+  HRESULT(WINAPI* CreateString)(PCNZWCH, UINT32, HSTRING*);
+  HRESULT(WINAPI* DeleteString)(HSTRING);
+} g_ro;
+
+static bool ro_load(void) {
+  HMODULE m = LoadLibraryExW(L"combase.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!m) return false;
+  g_ro.Initialize = (void*)GetProcAddress(m, "RoInitialize");
+  g_ro.GetActivationFactory = (void*)GetProcAddress(m, "RoGetActivationFactory");
+  g_ro.ActivateInstance = (void*)GetProcAddress(m, "RoActivateInstance");
+  g_ro.CreateString = (void*)GetProcAddress(m, "WindowsCreateString");
+  g_ro.DeleteString = (void*)GetProcAddress(m, "WindowsDeleteString");
+  return g_ro.Initialize && g_ro.GetActivationFactory && g_ro.ActivateInstance && g_ro.CreateString && g_ro.DeleteString;
+}
+static ToastNotifier* g_notifier;
+
+// The pane a toast is from, kept by its id (a pane's id is never reused) until a click.
+typedef struct ActivatedHandler {
+  const struct ActivatedHandlerVtbl* v;
+  LONG ref;
+  int pane;
+} ActivatedHandler;
+struct ActivatedHandlerVtbl {
+  HRESULT(STDMETHODCALLTYPE* QueryInterface)(ActivatedHandler*, REFIID, void**);
+  ULONG(STDMETHODCALLTYPE* AddRef)(ActivatedHandler*);
+  ULONG(STDMETHODCALLTYPE* Release)(ActivatedHandler*);
+  HRESULT(STDMETHODCALLTYPE* Invoke)(ActivatedHandler*, void*, void*);
+};
+static HRESULT STDMETHODCALLTYPE ah_qi(ActivatedHandler* h, REFIID iid, void** out) {
+  if (IsEqualIID(iid, &kIidActivatedHandler) || IsEqualIID(iid, &kIidUnknown) || IsEqualIID(iid, &kIidAgileObject)) {
+    *out = h;
+    InterlockedIncrement(&h->ref);
+    return S_OK;
+  }
+  *out = NULL;
+  return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE ah_addref(ActivatedHandler* h) { return (ULONG)InterlockedIncrement(&h->ref); }
+static ULONG STDMETHODCALLTYPE ah_release(ActivatedHandler* h) {
+  LONG r = InterlockedDecrement(&h->ref);
+  if (r == 0) free(h);
+  return (ULONG)r;
+}
+// On a thread of Windows' own: the UI thread does the rest.
+static HRESULT STDMETHODCALLTYPE ah_invoke(ActivatedHandler* h, void* sender, void* args) {
+  (void)sender, (void)args;
+  if (g_notify_hwnd) PostMessageW(g_notify_hwnd, WM_TOAST_CLICK, (WPARAM)h->pane, 0);
+  return S_OK;
+}
+static const struct ActivatedHandlerVtbl kActivatedVtbl = {ah_qi, ah_addref, ah_release, ah_invoke};
+
+static Window* pane_by_id(int id) {
+  for (Frame* f = g_frames; f; f = f->next)
+    for (int i = 0; i < f->ntabs; i++) {
+      Window* panes[64];
+      int n = f->tabs[i]->tab ? tab_panes(f->tabs[i]->tab, panes, 64) : 0;
+      if (n <= 0) panes[0] = f->tabs[i], n = 1;
+      for (int k = 0; k < n && k < 64; k++)
+        if (panes[k]->id == id) return panes[k];
+    }
+  return NULL;
+}
+
+// Is Ghostty installed, i.e. is there a Start-menu shortcut that names our AppUserModelID?
+// (The installer's: %APPDATA%\Microsoft\Windows\Start Menu\Programs\Ghostty.lnk.)
+static bool shortcut_installed(void) {
+  WCHAR path[MAX_PATH * 2];
+  DWORD n = GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH);
+  if (!n || n >= MAX_PATH) return false;
+  wcscat(path, L"\\Microsoft\\Windows\\Start Menu\\Programs\\Ghostty.lnk");
+  return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Once, before the first window is shown: take the AppUserModelID when the installer's
+// shortcut is there (the taskbar then groups and pins Ghostty under it too), and get a
+// toast notifier for it. GHOSTTY_TOAST=off keeps balloons.
+static void toasts_init(void) {
+  if (g_toasts >= 0) return;
+  g_toasts = 0;
+  WCHAR env[8];
+  if (GetEnvironmentVariableW(L"GHOSTTY_TOAST", env, 8) && _wcsicmp(env, L"off") == 0) {
+    fprintf(stderr, "ghostty: notify: toasts off (GHOSTTY_TOAST=off): balloons\n");
+    return;
+  }
+  if (!shortcut_installed()) {
+    fprintf(stderr, "ghostty: notify: no Start-menu shortcut (not installed): balloons\n");
+    return;
+  }
+  HRESULT hr = SetCurrentProcessExplicitAppUserModelID(GHOSTTY_AUMID);
+  if (!ro_load()) {
+    fprintf(stderr, "ghostty: notify: no WinRT in combase.dll: balloons\n");
+    return;
+  }
+  HRESULT ro = g_ro.Initialize(RO_INIT_SINGLETHREADED);  // the UI thread; S_FALSE or RPC_E_CHANGED_MODE when COM is up already
+  HSTRING cls = NULL, id = NULL;
+  ToastManagerStatics* statics = NULL;
+  HRESULT h2 = g_ro.CreateString(L"Windows.UI.Notifications.ToastNotificationManager", 48, &cls);
+  if (SUCCEEDED(h2)) h2 = g_ro.GetActivationFactory(cls, &kIidToastManagerStatics, (void**)&statics);
+  if (SUCCEEDED(h2)) h2 = g_ro.CreateString(GHOSTTY_AUMID, (UINT32)wcslen(GHOSTTY_AUMID), &id);
+  if (SUCCEEDED(h2)) h2 = statics->v->CreateToastNotifierWithId(statics, id, (void**)&g_notifier);
+  if (statics) statics->v->h.Release(statics);
+  if (cls) g_ro.DeleteString(cls);
+  if (id) g_ro.DeleteString(id);
+  fprintf(stderr, "ghostty: notify: AppUserModelID %ls (HRESULT 0x%08lx), RoInitialize 0x%08lx, toast notifier 0x%08lx: %s\n",
+          GHOSTTY_AUMID, (unsigned long)hr, (unsigned long)ro, (unsigned long)h2, g_notifier ? "toasts" : "balloons");
+  g_toasts = g_notifier ? 1 : 0;
+}
+
+// `s` (UTF-8) escaped for XML text, appended to the wide buffer `out` (cap WCHARs).
+static void xml_append(WCHAR* out, size_t cap, const char* s) {
+  WCHAR* w = s && *s ? utf8_to_utf16(s, -1) : NULL;
+  size_t o = wcslen(out);
+  for (const WCHAR* p = w; p && *p && o + 8 < cap; p++) {
+    const WCHAR* e = *p == L'&' ? L"&amp;" : *p == L'<' ? L"&lt;" : *p == L'>' ? L"&gt;" : *p == L'"' ? L"&quot;" : NULL;
+    if (e) { wcscpy(out + o, e); o += wcslen(e); }
+    else if (*p >= 0x20 || *p == L'\n' || *p == L'\t') out[o++] = *p;
+  }
+  out[o] = 0;
+  free(w);
+}
+
+// The toast: title, body, and the tab's title as the attribution line (macOS shows it as the
+// subtitle). Returns the HRESULT; on a failure the caller shows a balloon instead.
+static HRESULT toast_show(Window* w, const char* title, const char* body) {
+  static WCHAR xml[4096];
+  wcscpy(xml, L"<toast><visual><binding template=\"ToastGeneric\"><text>");
+  xml_append(xml, 4096, title && *title ? title : "Ghostty");
+  wcscat(xml, L"</text><text>");
+  xml_append(xml, 4096, body);
+  wcscat(xml, L"</text>");
+  if (w->title && *w->title) {
+    char* t = utf16_to_utf8(w->title, -1);
+    wcscat(xml, L"<text placement=\"attribution\">");
+    xml_append(xml, 4096, t);
+    wcscat(xml, L"</text>");
+    free(t);
+  }
+  wcscat(xml, L"</binding></visual></toast>");
+
+  HSTRING cls_doc = NULL, cls_toast = NULL, hxml = NULL;
+  void* insp = NULL;
+  XmlDocumentIO* io = NULL;
+  void* doc = NULL;
+  ToastFactory* factory = NULL;
+  ToastNotification* toast = NULL;
+  HRESULT hr = g_ro.CreateString(L"Windows.Data.Xml.Dom.XmlDocument", 32, &cls_doc);
+  if (SUCCEEDED(hr)) hr = g_ro.ActivateInstance(cls_doc, (void**)&insp);
+  if (SUCCEEDED(hr)) hr = ((IInspectableVtblHead*)*(void**)insp)->QueryInterface(insp, &kIidXmlDocumentIO, (void**)&io);
+  if (SUCCEEDED(hr)) hr = g_ro.CreateString(xml, (UINT32)wcslen(xml), &hxml);
+  if (SUCCEEDED(hr)) hr = io->v->LoadXml(io, hxml);
+  if (SUCCEEDED(hr)) hr = io->v->h.QueryInterface(io, &kIidXmlDocument, &doc);
+  if (SUCCEEDED(hr)) hr = g_ro.CreateString(L"Windows.UI.Notifications.ToastNotification", 42, &cls_toast);
+  if (SUCCEEDED(hr)) hr = g_ro.GetActivationFactory(cls_toast, &kIidToastFactory, (void**)&factory);
+  if (SUCCEEDED(hr)) hr = factory->v->CreateToastNotification(factory, doc, (void**)&toast);
+  if (SUCCEEDED(hr)) {
+    // A click brings its pane forward (in-process, while Ghostty runs; no COM activator).
+    ActivatedHandler* h = calloc(1, sizeof *h);
+    if (h) {
+      h->v = &kActivatedVtbl;
+      h->ref = 1;
+      h->pane = w->id;
+      INT64 token = 0;
+      HRESULT ha = toast->v->add_Activated(toast, h, &token);
+      if (FAILED(ha)) fprintf(stderr, "ghostty: notify: toast click handler not set (HRESULT 0x%08lx)\n", (unsigned long)ha);
+      ah_release(h);  // the toast holds its own reference now
+    }
+    hr = g_notifier->v->Show(g_notifier, toast);
+  }
+  if (toast) toast->v->h.Release(toast);
+  if (factory) factory->v->h.Release(factory);
+  if (doc) ((IInspectableVtblHead*)*(void**)doc)->Release(doc);
+  if (io) io->v->h.Release(io);
+  if (insp) ((IInspectableVtblHead*)*(void**)insp)->Release(insp);
+  if (hxml) g_ro.DeleteString(hxml);
+  if (cls_toast) g_ro.DeleteString(cls_toast);
+  if (cls_doc) g_ro.DeleteString(cls_doc);
+  return hr;
 }
 
 // Copies UTF-8 `s` into `dst` (n WCHARs), cut to fit.
@@ -134,19 +404,26 @@ void notify_toast(Window* w, const char* title, const char* body) {
   Frame* f;
   int i;
   if (!find_tab(w, &f, &i)) return;
-  bool seen = GetForegroundWindow() == f->hwnd && f->active == i;
+  // macOS: not shown when its window is the key window and its surface is focused. Here: the
+  // foreground window, its selected tab, and that tab's focused pane.
+  bool seen = GetForegroundWindow() == f->hwnd && f->active == i && f->tabs[i] == w;
   fprintf(stderr, "ghostty: notify: \"%s\" / \"%s\" %s\n", title ? title : "", body ? body : "",
-          seen ? "not shown: its tab is the selected tab of the foreground window" : "shown");
+          seen ? "not shown: its pane is the focused pane of the foreground window" : "shown");
   {
     char t[600], bd[1200], ev[2048];
     json_str(t, sizeof t, title);
     json_str(bd, sizeof bd, body);
     snprintf(ev, sizeof ev, "{\"kind\":\"notification\",\"window\":%d,\"title\":%s,\"body\":%s,\"shown\":%s,\"why\":\"%s\"}",
              frame_index(f), t, bd, seen ? "false" : "true",
-             seen ? "its tab is the selected tab of the foreground window" : "");
+             seen ? "its pane is the focused pane of the foreground window" : "");
     test_event(ev);
   }
   if (seen || !notify_window()) return;
+  if (g_toasts == 1) {
+    HRESULT hr = toast_show(w, title, body);
+    fprintf(stderr, "ghostty: notify: toast %s (HRESULT 0x%08lx)\n", SUCCEEDED(hr) ? "shown" : "failed, a balloon instead", (unsigned long)hr);
+    if (SUCCEEDED(hr)) return;
+  }
 
   NOTIFYICONDATAW nid = {
       .cbSize = sizeof nid,
@@ -276,10 +553,17 @@ static TBPFLAG wanted(Frame* f, int* value) {
     TabProgress* p = progress_of(f->tabs[f->active]);
     if (p && p->state != GHOSTTY_PROGRESS_STATE_REMOVE) pick = p;
   }
+  // Else the most severe of every pane of the window: a split's other panes report too
+  // (progress is kept per pane, f->tabs[i] is only a tab's focused pane).
   if (!pick)
     for (int i = 0; i < f->ntabs; i++) {
-      TabProgress* p = progress_of(f->tabs[i]);
-      if (p && severity(p->state) > (pick ? severity(pick->state) : 0)) pick = p;
+      Window* panes[64];
+      int n = f->tabs[i]->tab ? tab_panes(f->tabs[i]->tab, panes, 64) : 0;
+      if (n <= 0) panes[0] = f->tabs[i], n = 1;
+      for (int k = 0; k < n && k < 64; k++) {
+        TabProgress* p = progress_of(panes[k]);
+        if (p && severity(p->state) > (pick ? severity(pick->state) : 0)) pick = p;
+      }
     }
   TBPFLAG flag = pick ? flag_of(pick->state) : TBPF_NOPROGRESS;
   *value = pick && flag != TBPF_INDETERMINATE && flag != TBPF_NOPROGRESS ? pick->value : -1;
@@ -391,6 +675,7 @@ bool notify_frame_msg(HWND hwnd, UINT msg) {
   static UINT button_created;
   if (!button_created) button_created = RegisterWindowMessageW(L"TaskbarButtonCreated");
   if (msg == WM_NCCREATE) {
+    toasts_init();  // the AppUserModelID must be set before the first window is shown
     // Before the button exists: an elevated process would not get the message otherwise.
     ChangeWindowMessageFilterEx(hwnd, button_created, MSGFLT_ALLOW, NULL);
     return false;
