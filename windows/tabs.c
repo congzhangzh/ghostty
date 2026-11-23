@@ -555,6 +555,7 @@ static Window* new_pane(Frame* f, ghostty_surface_t from,
   SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
   DragAcceptFiles(w->hwnd, TRUE);  // files dropped on it: their paths (drop_files)
   w->dxgi = present_dxgi_wanted();  // frames through a DXGI flip swap chain (dxgi.c)
+  w->last_shared = -1;
 
   ghostty_surface_config_s cfg = from ? ghostty_surface_inherited_config(from, context)
                                       : ghostty_surface_config_new();

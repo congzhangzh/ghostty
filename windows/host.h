@@ -158,6 +158,8 @@ struct Window {
   void* shared_old[2];
   UINT shared_w, shared_h;
   uint64_t interop_frames;
+  int last_shared;          // the shared texture last presented, -1 none
+  uint64_t overlay_frames;  // frames the stats overlay was drawn on (DXGI path)
   uint64_t key_qpc;        // a key went down, no frame taken since
   uint64_t frame_key_qpc;  // the frame shown now is the first after it
   double latency_ms;       // that key to the end of its frame's paint
@@ -247,6 +249,7 @@ bool present_dxgi_wanted(void);
 bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT stride);
 void dxgi_pane_gone(Window* w);
 bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height);
+void dxgi_repaint(Window* w);
 extern const char* ghostty_windows_gl_driver(void);  // pkg/opengl/wgl.zig
 void drop_files(Window* w, HDROP drop);
 void mouse_pos(Window* w, LPARAM lp);
@@ -330,6 +333,7 @@ LRESULT testctl_ui(LPARAM req);
 void test_event(const char* json_object);
 void ime_drive(Window* w, const char* comp, int commit, Line* b);
 void present_stats_json(Line* b);  // dxgi.c
+const char* dxgi_adapter(void);
 ghostty_config_t config_load_with(const char* theme_file);
 void config_reload(ghostty_surface_t surface, bool soft);
 char* theme_config_file(void);

@@ -4,7 +4,7 @@
 // Presenting frames
 
 void take_frame(Window* w) {
-  ghostty_frame_s f;
+  ghostty_frame_s f = {0};  // zeroed: a lib older than this header leaves its new fields (shared) alone
   if (!ghostty_surface_take_frame(w->surface, &f)) return;
 
   if (!f.pixels && f.shared && w->dxgi) {
@@ -88,8 +88,16 @@ void take_frame(Window* w) {
 void paint(Window* w) {
   PAINTSTRUCT ps;
   HDC dc = BeginPaint(w->hwnd, &ps);
-  if (w->swap || w->dxgi) {
-    // OpenGL (or the DXGI swap chain) owns the window's pixels (the stats overlay is not drawn in
+  if (w->dxgi) {
+    // The DXGI swap chain owns the window's pixels; the stats overlay is
+    // drawn on its back buffer (dxgi.c), and goes out again here when it
+    // changed without a new frame.
+    EndPaint(w->hwnd, &ps);
+    dxgi_repaint(w);
+    return;
+  }
+  if (w->swap) {
+    // OpenGL owns the window's pixels (the stats overlay is not drawn in
     // this mode yet; the stats pipe still has the numbers).
     EndPaint(w->hwnd, &ps);
     return;

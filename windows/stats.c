@@ -148,10 +148,11 @@ void stats_json(Line* b0) {
       put(&b,
           ",\"fps\":%.1f,\"key_ms\":%.1f,\"gpu_wait_ms\":%.3f,"
           "\"readback_ms\":%.3f,\"swizzle_ms\":%.3f,"
-          "\"blit_ms\":%.3f,\"wait_ms\":%.3f,\"present_ms\":%.3f,\"frame\":[%u,%u],\"grid\":[%u,%u],"
+          "\"blit_ms\":%.3f,\"wait_ms\":%.3f,\"present_ms\":%.3f,\"overlay_frames\":%llu,\"frame\":[%u,%u],\"grid\":[%u,%u],"
           "\"cell\":[%u,%u]}",
           w->fps, w->latency_ms, w->gpu_wait_avg_ms, w->readback_avg_ms,
-          w->swizzle_avg_ms, w->blit_avg_ms, w->wait_avg_ms, w->present_avg_ms, w->frame_w,
+          w->swizzle_avg_ms, w->blit_avg_ms, w->wait_avg_ms, w->present_avg_ms,
+          (unsigned long long)w->overlay_frames, w->frame_w,
           w->frame_h, sz.columns, sz.rows, sz.cell_width_px, sz.cell_height_px);
     }
     put(&b, "]}");
@@ -238,26 +239,48 @@ WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box) {
   if (bl >= sizeof(build)) bl = sizeof(build) - 1;
   memcpy(build, b, bl);
   build[bl] = 0;
-  char text[1024];
+  // What each row measures depends on the path the frames take: GDI (the
+  // copy), DXGI flip (frames read back, uploaded), or interop (GPU to GPU).
+  bool interop = w->dxgi && w->interop_frames, dxgi = w->dxgi && !interop;
+  char path[200];
+  if (interop)
+    snprintf(path, sizeof(path), "4.3 core, WGL; frames GPU to GPU (interop), DXGI flip on %s", dxgi_adapter());
+  else if (dxgi)
+    snprintf(path, sizeof(path), "4.3 core, WGL; frames through the CPU, DXGI flip on %s", dxgi_adapter());
+  else
+    snprintf(path, sizeof(path), "4.3 core, WGL, frames through the CPU (GDI)");
+  char text[1400];
   snprintf(text, sizeof(text),
            "Ghostty stats (Ctrl+Shift+I)\n"
            "frames   %5.1f /s   %ux%u px\n"
            "key      %5.1f ms   key to its first frame on screen\n"
            "gpu      %5.2f ms   render thread waits for the GPU, per frame\n"
-           "readback %5.2f ms   glReadPixels into CPU memory, per frame\n"
-           "swizzle  %5.2f ms   RGBA to BGRA, per frame\n"
-           "blit     %5.2f ms   GDI SetDIBits, per frame\n"
+           "%s %5.2f ms   %s, per frame\n",
+           f->fps, w->frame_w, w->frame_h, w->latency_ms, f->gpu_wait_ms,
+           interop ? "copy    " : "readback", f->readback_ms,
+           interop ? "GL blit into the shared texture" : "glReadPixels into CPU memory");
+  size_t used = strlen(text);
+  if (w->dxgi)
+    snprintf(text + used, sizeof(text) - used,
+             "wait     %5.2f ms   for room in the flip queue, per frame\n"
+             "present  %5.2f ms   %s + Present, per frame\n",
+             w->wait_avg_ms, w->present_avg_ms, interop ? "GPU copy" : "upload");
+  else
+    snprintf(text + used, sizeof(text) - used,
+             "swizzle  %5.2f ms   RGBA to BGRA, per frame\n"
+             "blit     %5.2f ms   GDI SetDIBits, per frame\n",
+             f->swizzle_ms, f->blit_ms);
+  used = strlen(text);
+  snprintf(text + used, sizeof(text) - used,
            "cpu      %5.1f %%    of one core (the whole process)\n"
            "memory   %5.0f MB   working set, %.0f MB private\n"
            "grid     %ux%u cells of %ux%u px, %d tab%s\n"
-           "opengl   4.3 core, WGL, frames through the CPU\n"
+           "opengl   %s\n"
            "driver   %s\n"
            "%s",
-           f->fps, w->frame_w, w->frame_h, w->latency_ms, f->gpu_wait_ms,
-           f->readback_ms, f->swizzle_ms,
-           f->blit_ms, f->cpu_pct, f->ws_mb, f->private_mb, sz.columns,
+           f->cpu_pct, f->ws_mb, f->private_mb, sz.columns,
            sz.rows, sz.cell_width_px, sz.cell_height_px, f->ntabs,
-           f->ntabs == 1 ? "" : "s", gl_driver(), build);
+           f->ntabs == 1 ? "" : "s", path, gl_driver(), build);
   WCHAR* wt = utf8_to_utf16(text, -1);
   if (!wt) return NULL;
   HGDIOBJ old = SelectObject(dc, f->stats_font);

@@ -41,6 +41,7 @@ static struct {
 
 static bool chain_ready(Window* w, UINT width, UINT height);
 static bool device_ready(void);
+static void overlay(Window* w, ID3D11Texture2D* back, UINT width, UINT height);
 
 static ID3D11Device* g_dev;
 static ID3D11DeviceContext* g_ctx;
@@ -154,6 +155,9 @@ bool present_dxgi_wanted(void) {
   const char* v = getenv("GHOSTTY_PRESENT");
   return v && (strcmp(v, "dxgi") == 0 || strcmp(v, "interop") == 0) && !g_dxgi_failed;
 }
+
+// The DXGI device's adapter (the overlay names it).
+const char* dxgi_adapter(void) { return g_adapter; }
 
 // For the stats line.
 void present_stats_json(Line* b) {
@@ -310,6 +314,8 @@ bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height) {
   if (IDXGISwapChain1_GetBuffer((IDXGISwapChain1*)w->dxgi_chain, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK)
     return false;
   ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource*)back, (ID3D11Resource*)w->shared_tex[i]);
+  w->last_shared = (int)i;
+  overlay(w, back, width, height);
   ID3D11Texture2D_Release(back);
   HRESULT hr = IDXGISwapChain1_Present((IDXGISwapChain1*)w->dxgi_chain, 1, 0);
   uint64_t t2 = qpc();
@@ -322,7 +328,8 @@ bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height) {
 static bool chain_ready(Window* w, UINT width, UINT height) {
   IDXGISwapChain1* sc = w->dxgi_chain;
   if (sc && w->dxgi_w == width && w->dxgi_h == height) return true;
-  const UINT flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+  // GDI-compatible: the stats overlay is drawn with GDI on the back buffer.
+  const UINT flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
   if (sc) {  // a new size
     if (IDXGISwapChain1_ResizeBuffers(sc, 0, width, height, DXGI_FORMAT_UNKNOWN, flags) != S_OK) {
       chain_free(w);
@@ -356,6 +363,43 @@ static bool chain_ready(Window* w, UINT width, UINT height) {
   return true;
 }
 
+// The stats overlay (Ctrl+Shift+I) on the back buffer, through a GDI DC of
+// it (the swap chain is GDI-compatible): the same drawing as the GDI path.
+static void overlay(Window* w, ID3D11Texture2D* back, UINT width, UINT height) {
+  if (!w->frame || !w->frame->stats) return;
+  IDXGISurface1* s = NULL;
+  if (ID3D11Texture2D_QueryInterface(back, &IID_IDXGISurface1, (void**)&s) != S_OK) return;
+  HDC dc = NULL;
+  if (IDXGISurface1_GetDC(s, FALSE, &dc) == S_OK) {
+    RECT rc = {0, 0, (LONG)width, (LONG)height}, box;
+    WCHAR* text = stats_layout(w, dc, rc, &box);
+    if (text) {
+      present_stats(w, dc, box, text);
+      free(text);
+    }
+    IDXGISurface1_ReleaseDC(s, NULL);
+    w->overlay_frames++;
+  }
+  IDXGISurface1_Release(s);
+}
+
+// paint() in the DXGI path: the overlay changes without a new frame, so
+// the last frame goes out again with it (a flip-discard back buffer holds
+// nothing after a present): the kept pixels, or the last shared texture.
+void dxgi_repaint(Window* w) {
+  if (!w->dxgi || !w->dxgi_chain || !w->frame || !w->frame->stats) return;
+  ID3D11Texture2D* back = NULL;
+  if (IDXGISwapChain1_GetBuffer((IDXGISwapChain1*)w->dxgi_chain, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK)
+    return;
+  if (w->last_shared >= 0 && w->shared_tex[w->last_shared])
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource*)back, (ID3D11Resource*)w->shared_tex[w->last_shared]);
+  else if (w->bgra && w->dxgi_w && w->dxgi_h)
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource*)back, 0, NULL, w->bgra, w->dxgi_w * 4, 0);
+  overlay(w, back, w->dxgi_w, w->dxgi_h);
+  ID3D11Texture2D_Release(back);
+  IDXGISwapChain1_Present((IDXGISwapChain1*)w->dxgi_chain, 0, 0);
+}
+
 // A frame (BGRA, `stride` bytes a row) into the pane's swap chain. False:
 // the pane goes back to GDI (said once).
 bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT stride) {
@@ -367,6 +411,8 @@ bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT 
   ID3D11Texture2D* back = NULL;
   if (IDXGISwapChain1_GetBuffer(sc, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK) goto fail;
   ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource*)back, 0, NULL, bgra, stride, 0);
+  w->last_shared = -1;
+  overlay(w, back, width, height);
   ID3D11Texture2D_Release(back);
   HRESULT hr = IDXGISwapChain1_Present(sc, 1, 0);
   uint64_t t2 = qpc();
