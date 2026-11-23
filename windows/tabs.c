@@ -487,6 +487,7 @@ static Window* new_pane(Frame* f, ghostty_surface_t from,
     return NULL;
   }
   SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
+  DragAcceptFiles(w->hwnd, TRUE);  // files dropped on it: their paths (drop_files)
 
   ghostty_surface_config_s cfg = from ? ghostty_surface_inherited_config(from, context)
                                       : ghostty_surface_config_new();
@@ -925,6 +926,10 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_DEADCHAR:
     case WM_SYSDEADCHAR:
+      return 0;
+
+    case WM_DROPFILES:
+      drop_files(w, (HDROP)wp);
       return 0;
 
     case WM_MOUSEMOVE:

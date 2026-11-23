@@ -217,6 +217,7 @@ WCHAR* utf8_to_utf16(const char* s, int len);
 void handle_key(Window* w, UINT msg, WPARAM vk, LPARAM lp);
 void handle_char(Window* w, WCHAR ch);
 bool ime_message(Window* w, UINT msg, WPARAM wp, LPARAM lp, LRESULT* out);
+void drop_files(Window* w, HDROP drop);
 void mouse_pos(Window* w, LPARAM lp);
 void mouse_button(Window* w, ghostty_input_mouse_state_e state,
                          ghostty_input_mouse_button_e button);

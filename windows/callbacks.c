@@ -3,6 +3,11 @@
 // ---------------------------------------------------------------------------
 // Clipboard
 
+// The clipboard's text, its Windows line ends (CRLF) made LF, as Windows
+// Terminal does: Ghostty turns each LF into the Enter a shell expects (CR)
+// when the program has no bracketed paste, but a CRLF into two (CR CR: an
+// empty command after each line, a Python block ended early); in a
+// bracketed paste the program gets the LF it expects, not a stray CR.
 static char* clipboard_text(HWND hwnd) {
   char* out = NULL;
   if (!OpenClipboard(hwnd)) return NULL;
@@ -15,7 +20,45 @@ static char* clipboard_text(HWND hwnd) {
     }
   }
   CloseClipboard();
+  if (out) {
+    char* d = out;
+    for (const char* p = out; *p; p++)
+      if (!(p[0] == '\r' && p[1] == '\n')) *d++ = *p;
+    *d = 0;
+  }
   return out;
+}
+
+// Files dropped on a pane (Explorer, the desktop): their paths go in as
+// text at the cursor, as on macOS, quoted where cmd or PowerShell would
+// split or read them (a space, & ( ) [ ] { } ^ = ; ! ' + , ` ~ $ % @ #),
+// one space between them. A path cannot hold a double quote.
+void drop_files(Window* w, HDROP drop) {
+  UINT n = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
+  Line t = {0};
+  for (UINT i = 0; i < n; i++) {
+    UINT len = DragQueryFileW(drop, i, NULL, 0);
+    WCHAR* p = malloc(((size_t)len + 1) * sizeof(WCHAR));
+    if (!p) continue;
+    DragQueryFileW(drop, i, p, len + 1);
+    char* s = utf16_to_utf8(p, -1);
+    free(p);
+    if (!s) continue;
+    bool quote = s[strcspn(s, " &()[]{}^=;!'+,`~$%@#")] != 0;
+    put(&t, "%s%s%s%s", t.len ? " " : "", quote ? "\"" : "", s, quote ? "\"" : "");
+    free(s);
+  }
+  DragFinish(drop);
+  if (t.len && w->surface) {
+    ghostty_surface_text(w->surface, t.p, t.len);
+    Line e = {0};
+    put(&e, "{\"kind\":\"drop\",\"pane\":%d,\"text\":", w->id);
+    put_string(&e, t.p);
+    put(&e, "}");
+    test_event(e.p);
+    free(e.p);
+  }
+  free(t.p);
 }
 
 static void set_clipboard_text(HWND hwnd, const char* data, size_t len) {

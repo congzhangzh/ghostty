@@ -1,5 +1,7 @@
 #include "host.h"
 
+#include <shlobj.h>  // DROPFILES
+
 // ---------------------------------------------------------------------------
 // The test-control pipe
 //
@@ -12,7 +14,7 @@
 //
 // A request is one JSON line, the answer one JSON line, in order; a client
 // may send many. Commands (protocol 1, agreed with the e2e driver):
-//   hello, list, text, key, action, read, screenshot, stats, window, events, menu, ime
+//   hello, list, text, key, action, read, screenshot, stats, window, events, menu, ime, drop
 // They run on the UI thread (posted to the wakeup window, answered within
 // 5 s or "ui timeout"); a screenshot is then taken from the screen by the
 // pipe's thread, after a frame, so it shows what was presented in either
@@ -571,6 +573,33 @@ LRESULT testctl_ui(LPARAM lp) {
       free(a);
     } else if (strcmp(cmd, "read") == 0) {
       ok = cmd_read(w, b);
+    } else if (strcmp(cmd, "drop") == 0) {
+      // {"cmd":"drop","paths":"a|b"}: files dropped on the pane, as
+      // Explorer's drop arrives (WM_DROPFILES with a DROPFILES block).
+      char* paths = jstr(&o, "paths");
+      ok = paths && *paths;
+      if (ok) {
+        WCHAR* wp = utf8_to_utf16(paths, -1);
+        size_t n = wp ? wcslen(wp) : 0;
+        HGLOBAL h = wp ? GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT,
+                                     sizeof(DROPFILES) + (n + 2) * sizeof(WCHAR))
+                       : NULL;
+        DROPFILES* df = h ? GlobalLock(h) : NULL;
+        if (df) {
+          df->pFiles = sizeof(DROPFILES);
+          df->fWide = TRUE;
+          WCHAR* list = (WCHAR*)((char*)df + sizeof(DROPFILES));
+          for (size_t i = 0; i < n; i++) list[i] = wp[i] == L'|' ? 0 : wp[i];
+          GlobalUnlock(h);
+          SendMessageW(w->hwnd, WM_DROPFILES, (WPARAM)h, 0);  // DragFinish frees it
+        } else {
+          if (h) GlobalFree(h);
+          ok = false;
+        }
+        free(wp);
+      }
+      if (!ok) put(b, ",\"error\":\"drop: no paths\"");
+      free(paths);
     } else if (strcmp(cmd, "ime") == 0) {
       // {"cmd":"ime","comp":"…","commit":"complete"|"cancel"}: drive the
       // pane's input context as an IME would (ime.c).
