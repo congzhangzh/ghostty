@@ -283,6 +283,15 @@ static void cmd_list(Line* b) {
         f->quick ? "true" : "false", IsWindowVisible(f->hwnd) ? "true" : "false",
         f->slogan_shown == 2 ? "slogan" : f->slogan_shown == 1 ? "motto" : "none");
     put_rect(b, f->hwnd);
+    RECT hr;
+    if (help_rect(f, &hr)) {  // the "?" button, on screen
+      POINT a = {hr.left, hr.top}, z = {hr.right, hr.bottom};
+      ClientToScreen(f->hwnd, &a);
+      ClientToScreen(f->hwnd, &z);
+      put(b, ",\"help\":[%ld,%ld,%ld,%ld]", a.x, a.y, z.x - a.x, z.y - a.y);
+    } else {
+      put(b, ",\"help\":null");
+    }
     int pv = -1;
     const char* ps = notify_progress_state(f, &pv);  // notify.c: NULL for none
     if (ps) {

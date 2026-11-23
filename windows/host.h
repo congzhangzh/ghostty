@@ -102,6 +102,7 @@ typedef enum {
   HIT_TAB,
   HIT_CLOSE,
   HIT_PLUS,
+  HIT_HELP,  // the "?" left of Windows' caption buttons: the overview
 } BarHit;
 
 // A tab: a child window of its Frame, with one surface drawing into it.
@@ -177,7 +178,7 @@ struct Frame {
   // The tab bar under the mouse: a tab (and whether its close button),
   // the new-tab button, or nothing.
   int hover;
-  bool hover_close, hover_plus, tracking;
+  bool hover_close, hover_plus, hover_help, tracking;
 
   // Tabs in the title bar: the width and height Windows' caption buttons
   // take (client pixels), and a tab pressed that may become a window drag.
@@ -321,6 +322,7 @@ int scheme_mode(void);
 void scheme_cycle(void);
 void quick_toggle(void);
 void palette_toggle(Window* w);
+bool help_rect(Frame* f, RECT* r);
 bool open_url(ghostty_action_open_url_kind_e kind, const char* url, size_t len, bool dry);
 void trigger_text(ghostty_input_trigger_s t, WCHAR* out, size_t cap);
 bool quick_timer(Frame* f, WPARAM id);

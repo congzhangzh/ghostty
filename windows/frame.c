@@ -235,11 +235,12 @@ Frame* front_frame(void) {
 static void track_bar_mouse(Frame* f, int x, int y) {
   int i;
   BarHit hit = bar_hit(f, x, y, &i);
-  bool close = hit == HIT_CLOSE, plus = hit == HIT_PLUS;
-  if (i != f->hover || close != f->hover_close || plus != f->hover_plus) {
+  bool close = hit == HIT_CLOSE, plus = hit == HIT_PLUS, help = hit == HIT_HELP;
+  if (i != f->hover || close != f->hover_close || plus != f->hover_plus || help != f->hover_help) {
     f->hover = i;
     f->hover_close = close;
     f->hover_plus = plus;
+    f->hover_help = help;
     invalidate_bar(f);
   }
   if (!f->tracking) {
@@ -408,7 +409,7 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
       f->tracking = false;
       f->hover = -1;
-      f->hover_close = f->hover_plus = false;
+      f->hover_close = f->hover_plus = f->hover_help = false;
       invalidate_bar(f);
       return 0;
     case WM_LBUTTONUP:
@@ -462,6 +463,9 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           new_tab(f, cur ? cur->surface : NULL, GHOSTTY_SURFACE_CONTEXT_TAB);
           break;
         }
+        case HIT_HELP:  // the overview, for the pane in front
+          if (f->active >= 0) palette_toggle(f->tabs[f->active]);
+          break;
         default: break;
       }
       return 0;

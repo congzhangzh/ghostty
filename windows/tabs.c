@@ -38,9 +38,22 @@ int bar_height(Frame* f) {
 // Where the tabs and the + go, [0, end): in the title bar, Windows'
 // buttons keep their place on the right, and a gap before them is left to
 // drag the window by.
+// The "?" button: one caption button's size, just left of Windows'
+// minimize button, in the title bar only (none in full screen).
+bool help_rect(Frame* f, RECT* r) {
+  if (!titlebar_active(f) || f->buttons_w <= 0) return false;
+  RECT rc;
+  GetClientRect(f->hwnd, &rc);
+  int w = f->buttons_w / 3, h = f->buttons_h > 0 ? f->buttons_h : bar_height(f);
+  SetRect(r, rc.right - f->buttons_w - w, 0, rc.right - f->buttons_w, h);
+  return true;
+}
+
 static int bar_end(Frame* f, int width) {
   if (!titlebar_active(f)) return width;
-  int end = width - f->buttons_w - px(f, 40);
+  RECT h;
+  int help = help_rect(f, &h) ? h.right - h.left : 0;
+  int end = width - f->buttons_w - help - px(f, 40);
   return end > 0 ? end : 0;
 }
 
@@ -96,6 +109,9 @@ BarHit bar_hit(Frame* f, int x, int y, int* index) {
   *index = -1;
   int end = bar_end(f, rc.right);
   int xp = plus_x(f, rc.right, b);
+  RECT help;
+  POINT pt = {x, y};
+  if (help_rect(f, &help) && PtInRect(&help, pt)) return HIT_HELP;
   if (b == 0 || y < 0 || y >= b || x < 0 || x >= end) return HIT_NONE;
   if (x >= xp + b) return HIT_NONE;  // after the +: the caption
   if (x >= xp) return HIT_PLUS;
@@ -201,6 +217,15 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
   int end = bar_end(f, width);
   int xp = plus_x(f, width, b);
   if (f->hover_plus) fill(dc, xp, 0, xp + b, b, hover);
+  // The "?" (the overview: the command palette), as Windows' own caption
+  // buttons: a glyph, a hover fill.
+  RECT help;
+  if (help_rect(f, &help)) {
+    if (f->hover_help) fill(dc, help.left, help.top, help.right, help.bottom, hover);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, f->hover_help ? g_fg : dim);
+    DrawTextW(dc, L"?", 1, &help, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  }
   fill(dc, xp, b - 1, width, b, line);
   int cx = xp + b / 2, cy = b / 2, h = px(f, 6);
   stroke(dc, cx - h, cy, cx + h + 1, cy, lw, dim);
