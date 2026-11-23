@@ -142,7 +142,7 @@ void stats_json(Line* b0) {
       char* title = w->title ? utf16_to_utf8(w->title, -1) : NULL;
       put(&b, "%s{\"selected\":%s,\"present\":\"%s\",\"title\":",
           i ? "," : "", i == f->active ? "true" : "false",
-          w->swap ? "swap" : w->dxgi ? "dxgi" : "copy");
+          w->swap ? "swap" : w->dxgi ? (w->interop_frames ? "interop" : "dxgi") : "copy");
       put_string(&b, title ? title : "");
       free(title);
       put(&b,

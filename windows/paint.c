@@ -7,6 +7,22 @@ void take_frame(Window* w) {
   ghostty_frame_s f;
   if (!ghostty_surface_take_frame(w->surface, &f)) return;
 
+  if (!f.pixels && f.shared && w->dxgi) {
+    // Interop: drawn into a shared texture; the GPU copies it to the
+    // swap chain (dxgi.c). No pixels went through the CPU.
+    if (dxgi_present_shared(w, f.shared - 1, f.width, f.height)) {
+      w->tick_frames++;
+      w->tick_readback_ms += f.readback_ns / 1e6;
+      if (w->key_qpc) {
+        w->latency_ms = (double)(qpc() - w->key_qpc) * g_qpc_ms;
+        w->key_qpc = 0;
+      }
+      w->frame_w = f.width;
+      w->frame_h = f.height;
+    }
+    ghostty_frame_free(&f);
+    return;
+  }
   if (!f.pixels) {
     // Swapped into the window by the renderer: on screen already. Counted
     // for the stats; the key that it answers is on screen now.

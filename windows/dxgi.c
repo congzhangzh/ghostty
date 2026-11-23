@@ -2,6 +2,7 @@
 #include "host.h"
 
 #include <GL/gl.h>
+#include <d3d10.h>  // ID3D10Multithread (the GL driver uses the device from the render thread)
 #include <d3d11.h>
 #include <dxgi1_3.h>  // IDXGISwapChain2: the latency object
 
@@ -37,6 +38,9 @@ static struct {
   char vendor[96], renderer[128];
   const char* why;   // why interop is not there
 } g_gl;
+
+static bool chain_ready(Window* w, UINT width, UINT height);
+static bool device_ready(void);
 
 static ID3D11Device* g_dev;
 static ID3D11DeviceContext* g_ctx;
@@ -109,11 +113,22 @@ static void probe_gl(void) {
 // GHOSTTY_PRESENT=interop: kept (and served by the DXGI path until the
 // blit lands) when the extension is there, else swap. At start, before any
 // surface (the core reads GHOSTTY_PRESENT on its render thread).
+// GHOSTTY_INTEROP_FORCE=1: the textures are made and handed over even
+// without the extension (tests: the core then reads frames back, and says
+// why).
+static bool interop_forced(void) {
+  const char* v = getenv("GHOSTTY_INTEROP_FORCE");
+  return v && strcmp(v, "1") == 0;
+}
+
 void present_mode_resolve(void) {
   const char* v = getenv("GHOSTTY_PRESENT");
   if (!v || strcmp(v, "interop") != 0) return;
   probe_gl();
-  if (g_gl.interop) {
+  if (interop_forced()) {
+    fprintf(stderr, "ghostty: present: interop forced (GHOSTTY_INTEROP_FORCE=1)%s\n",
+            g_gl.interop ? "" : ", though the probe found no WGL_NV_DX_interop2");
+  } else if (g_gl.interop) {
     fprintf(stderr, "ghostty: present: interop available (%s, %s%s); frames through DXGI (the GL blit "
                     "is not in yet)\n",
             g_gl.vendor, g_gl.renderer, g_gl.have_luid ? ", LUID known" : "");
@@ -199,6 +214,13 @@ static bool device_ready(void) {
     goto fail;
   }
   IDXGIFactory1_Release(f1);
+  // The GL driver uses the device from the render thread (interop), the
+  // host from this one.
+  ID3D10Multithread* mt = NULL;
+  if (ID3D11Device_QueryInterface(g_dev, &IID_ID3D10Multithread, (void**)&mt) == S_OK) {
+    ID3D10Multithread_SetMultithreadProtected(mt, TRUE);
+    ID3D10Multithread_Release(mt);
+  }
   fprintf(stderr, "ghostty: present: DXGI flip model on %s (feature level 0x%x)\n", g_adapter, (unsigned)fl);
   return true;
 fail:
@@ -215,7 +237,76 @@ static void chain_free(Window* w) {
   w->dxgi_w = w->dxgi_h = 0;
 }
 
-void dxgi_pane_gone(Window* w) { chain_free(w); }
+static void shared_free(void** t) {
+  for (int i = 0; i < 2; i++)
+    if (t[i]) {
+      ID3D11Texture2D_Release((ID3D11Texture2D*)t[i]);
+      t[i] = NULL;
+    }
+}
+
+// After the surface is freed (its render thread has stopped).
+void dxgi_pane_gone(Window* w) {
+  chain_free(w);
+  shared_free(w->shared_tex);
+  shared_free(w->shared_old);
+}
+
+// Interop: two textures of the frame's size, handed to the renderer (it
+// draws frames into them, WGL_NV_DX_interop2); a new size, a new pair, the
+// old one kept until a frame comes from the new (the renderer may still
+// draw into it until then).
+static void shared_sync(Window* w, UINT width, UINT height) {
+  const char* v = getenv("GHOSTTY_PRESENT");
+  if (!v || strcmp(v, "interop") != 0 || !(g_gl.interop || interop_forced())) return;
+  if (w->shared_tex[0] && w->shared_w == width && w->shared_h == height) return;
+  if (w->shared_old[0]) return;  // the last switch is not through yet
+  D3D11_TEXTURE2D_DESC d = {0};
+  d.Width = width;
+  d.Height = height;
+  d.MipLevels = 1;
+  d.ArraySize = 1;
+  d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  d.SampleDesc.Count = 1;
+  d.Usage = D3D11_USAGE_DEFAULT;
+  d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+  ID3D11Texture2D* t[2] = {NULL, NULL};
+  for (int i = 0; i < 2; i++)
+    if (ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &t[i]) != S_OK) {
+      shared_free((void**)t);
+      return;
+    }
+  memcpy(w->shared_old, w->shared_tex, sizeof(w->shared_old));
+  w->shared_tex[0] = t[0];
+  w->shared_tex[1] = t[1];
+  w->shared_w = width;
+  w->shared_h = height;
+  ghostty_surface_set_shared_textures(w->surface, g_dev, t[0], t[1], width, height);
+  char ev[96];
+  snprintf(ev, sizeof(ev), "{\"kind\":\"interop\",\"what\":\"textures\",\"size\":[%u,%u]}", width, height);
+  test_event(ev);
+}
+
+// A frame the renderer drew into shared texture `i`: copied on the GPU
+// into the back buffer and presented.
+bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height) {
+  if (i > 1 || !w->shared_tex[i] || !device_ready() || !chain_ready(w, width, height)) return false;
+  shared_free(w->shared_old);  // the renderer has moved to the new pair
+  uint64_t t0 = qpc();
+  if (w->dxgi_wait) WaitForSingleObjectEx(w->dxgi_wait, 100, TRUE);
+  uint64_t t1 = qpc();
+  ID3D11Texture2D* back = NULL;
+  if (IDXGISwapChain1_GetBuffer((IDXGISwapChain1*)w->dxgi_chain, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK)
+    return false;
+  ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource*)back, (ID3D11Resource*)w->shared_tex[i]);
+  ID3D11Texture2D_Release(back);
+  HRESULT hr = IDXGISwapChain1_Present((IDXGISwapChain1*)w->dxgi_chain, 1, 0);
+  uint64_t t2 = qpc();
+  w->tick_wait_ms += (double)(t1 - t0) * g_qpc_ms;
+  w->tick_present_ms += (double)(t2 - t1) * g_qpc_ms;
+  w->interop_frames++;
+  return SUCCEEDED(hr);
+}
 
 static bool chain_ready(Window* w, UINT width, UINT height) {
   IDXGISwapChain1* sc = w->dxgi_chain;
@@ -269,6 +360,7 @@ bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT 
   HRESULT hr = IDXGISwapChain1_Present(sc, 1, 0);
   uint64_t t2 = qpc();
   if (FAILED(hr)) goto fail;
+  shared_sync(w, width, height);  // interop: textures for the renderer, this size
   w->tick_wait_ms += (double)(t1 - t0) * g_qpc_ms;
   w->tick_present_ms += (double)(t2 - t1) * g_qpc_ms;
   return true;

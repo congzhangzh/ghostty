@@ -152,6 +152,12 @@ struct Window {
   HANDLE dxgi_wait;
   UINT dxgi_w, dxgi_h;
   double tick_wait_ms, tick_present_ms, wait_avg_ms, present_avg_ms;
+  // Interop (dxgi.c): the two textures the renderer draws into, their size,
+  // the pair before a resize (kept until the renderer moves), frames so far.
+  void* shared_tex[2];
+  void* shared_old[2];
+  UINT shared_w, shared_h;
+  uint64_t interop_frames;
   uint64_t key_qpc;        // a key went down, no frame taken since
   uint64_t frame_key_qpc;  // the frame shown now is the first after it
   double latency_ms;       // that key to the end of its frame's paint
@@ -240,6 +246,7 @@ void present_mode_resolve(void);
 bool present_dxgi_wanted(void);
 bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT stride);
 void dxgi_pane_gone(Window* w);
+bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height);
 extern const char* ghostty_windows_gl_driver(void);  // pkg/opengl/wgl.zig
 void drop_files(Window* w, HDROP drop);
 void mouse_pos(Window* w, LPARAM lp);

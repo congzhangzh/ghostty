@@ -59,6 +59,14 @@ context: Context,
 /// back and the host presents them (the default).
 swap_window: SwapWindow = if (Device.api == .wgl) null else {},
 
+/// Zero-copy (a), step 3 (Windows): frames blitted on the GPU into two
+/// D3D11 textures the host shares (WGL_NV_DX_interop2), which it copies
+/// into its DXGI flip swap chain, instead of being read back. The host
+/// sets them from its thread (setSharedTextures); this thread registers
+/// them when they change. Any failure: frames are read back as before.
+dx: DxInterop = if (Device.api == .wgl) .{} else {},
+
+
 /// The size of the last frame swapped into `swap_window`: a new size
 /// rebinds the context to the window first.
 swap_size: if (Device.api == .wgl) [2]usize else void = if (Device.api == .wgl) .{ 0, 0 } else {},
@@ -71,6 +79,172 @@ const swap_give_up = 3;
 const SwapWindow = if (Device.api == .wgl) ?gl.wgl.Window else void;
 
 /// GHOSTTY_PRESENT=swap asks for the swap present path (Windows).
+const DxInterop = if (Device.api == .wgl) struct {
+    // Set by the host's thread, under `mutex`.
+    mutex: std.Io.Mutex = .init,
+    gen: u32 = 0,
+    device: ?*anyopaque = null,
+    tex: [2]?*anyopaque = .{ null, null },
+    width: u32 = 0,
+    height: u32 = 0,
+    // The render thread's.
+    used: u32 = 0,
+    fns: ?Fns = null,
+    hdev: ?*anyopaque = null,
+    hobj: [2]?*anyopaque = .{ null, null },
+    rb: [2]gl.Renderbuffer = undefined,
+    fbo: [2]gl.Framebuffer = undefined,
+    ready: bool = false,
+    next: u1 = 0,
+
+    const Fns = struct {
+        open: *const fn (?*anyopaque) callconv(.winapi) ?*anyopaque,
+        close: *const fn (?*anyopaque) callconv(.winapi) c_int,
+        register: *const fn (?*anyopaque, ?*anyopaque, c_uint, c_uint, c_uint) callconv(.winapi) ?*anyopaque,
+        unregister: *const fn (?*anyopaque, ?*anyopaque) callconv(.winapi) c_int,
+        lock: *const fn (?*anyopaque, c_int, [*]?*anyopaque) callconv(.winapi) c_int,
+        unlock: *const fn (?*anyopaque, c_int, [*]?*anyopaque) callconv(.winapi) c_int,
+    };
+} else void;
+
+/// The host's thread: the D3D11 device and two textures to draw frames
+/// into (or none: null), `width` x `height` pixels.
+pub fn setSharedTextures(
+    self: *OpenGL,
+    device: ?*anyopaque,
+    t0: ?*anyopaque,
+    t1: ?*anyopaque,
+    width: u32,
+    height: u32,
+) void {
+    if (comptime Device.api != .wgl) return;
+    const io = global.io();
+    self.dx.mutex.lockUncancelable(io);
+    defer self.dx.mutex.unlock(io);
+    self.dx.device = device;
+    self.dx.tex = .{ t0, t1 };
+    self.dx.width = width;
+    self.dx.height = height;
+    self.dx.gen +%= 1;
+}
+
+fn dxRelease(self: *OpenGL) void {
+    if (comptime Device.api != .wgl) return;
+    const dx = &self.dx;
+    if (dx.ready) {
+        for (0..2) |i| {
+            if (dx.hobj[i]) |o| _ = dx.fns.?.unregister(dx.hdev, o);
+            dx.fbo[i].destroy();
+            dx.rb[i].destroy();
+            dx.hobj[i] = null;
+        }
+    }
+    if (dx.hdev) |h| _ = dx.fns.?.close(h);
+    dx.hdev = null;
+    dx.ready = false;
+}
+
+fn dxRegister(self: *OpenGL, device: *anyopaque, tex: [2]?*anyopaque) bool {
+    if (comptime Device.api != .wgl) return false;
+    const dx = &self.dx;
+    if (dx.fns == null) {
+        const p = gl.wgl.getProcAddress;
+        dx.fns = .{
+            .open = @ptrCast(p("wglDXOpenDeviceNV") orelse {
+                log.warn("present: interop: no WGL_NV_DX_interop2 in this driver, reading frames back", .{});
+                return false;
+            }),
+            .close = @ptrCast(p("wglDXCloseDeviceNV") orelse return false),
+            .register = @ptrCast(p("wglDXRegisterObjectNV") orelse return false),
+            .unregister = @ptrCast(p("wglDXUnregisterObjectNV") orelse return false),
+            .lock = @ptrCast(p("wglDXLockObjectsNV") orelse return false),
+            .unlock = @ptrCast(p("wglDXUnlockObjectsNV") orelse return false),
+        };
+    }
+    const f = dx.fns.?;
+    dx.hdev = f.open(device) orelse {
+        log.warn("present: interop: wglDXOpenDeviceNV failed (another GPU than GL's?), reading frames back", .{});
+        return false;
+    };
+    for (0..2) |i| {
+        dx.rb[i] = gl.Renderbuffer.create() catch return false;
+        dx.fbo[i] = gl.Framebuffer.create() catch return false;
+        // GL_RENDERBUFFER, WGL_ACCESS_WRITE_DISCARD_NV
+        dx.hobj[i] = f.register(dx.hdev, tex[i], dx.rb[i].id, 0x8D41, 0x0002) orelse {
+            log.warn("present: interop: wglDXRegisterObjectNV failed, reading frames back", .{});
+            dx.ready = true; // so dxRelease frees what was made
+            self.dxRelease();
+            return false;
+        };
+        var obj = [1]?*anyopaque{dx.hobj[i]};
+        if (f.lock(dx.hdev, 1, &obj) == 0) return false;
+        defer _ = f.unlock(dx.hdev, 1, &obj);
+        const b = dx.fbo[i].bind(.draw) catch return false;
+        defer b.unbind();
+        b.renderbuffer(.color0, dx.rb[i]) catch return false;
+    }
+    dx.ready = true;
+    dx.next = 0;
+    log.info("present: interop: frames go into the host's D3D11 textures", .{});
+    return true;
+}
+
+/// The interop path for this frame, or null (read it back).
+fn dxPresent(self: *OpenGL, target: Target) !?ExportedFrame {
+    if (comptime Device.api != .wgl) return null;
+    const dx = &self.dx;
+    const io = global.io();
+    dx.mutex.lockUncancelable(io);
+    const gen = dx.gen;
+    const device = dx.device;
+    const tex = dx.tex;
+    const w = dx.width;
+    const h = dx.height;
+    dx.mutex.unlock(io);
+    if (gen != dx.used) {
+        self.dxRelease();
+        dx.used = gen;
+        if (device != null and tex[0] != null and tex[1] != null)
+            _ = self.dxRegister(device.?, tex);
+    }
+    if (!dx.ready) return null;
+    // A new size: the host makes new textures; read back meanwhile.
+    if (w != target.width or h != target.height) return null;
+    const t0: std.Io.Timestamp = .now(io, .awake);
+    const idx = dx.next;
+    var obj = [1]?*anyopaque{dx.hobj[idx]};
+    if (dx.fns.?.lock(dx.hdev, 1, &obj) == 0) {
+        log.warn("present: interop: lock failed, reading frames back", .{});
+        self.dxRelease();
+        return null;
+    }
+    {
+        const read = try target.framebuffer.bind(.read);
+        defer read.unbind();
+        const draw = try dx.fbo[idx].bind(.draw);
+        defer draw.unbind();
+        const srgb = gl.glad.context.IsEnabled.?(gl.c.GL_FRAMEBUFFER_SRGB) != 0;
+        if (srgb) gl.glad.context.Disable.?(gl.c.GL_FRAMEBUFFER_SRGB);
+        const iw: gl.c.GLint = @intCast(w);
+        const ih: gl.c.GLint = @intCast(h);
+        // GL's rows go up, a D3D texture's down: flipped on the way.
+        try gl.blitFramebuffer(0, 0, iw, ih, 0, ih, iw, 0, .{ .color_buffer_bit = true }, .nearest);
+        if (srgb) gl.glad.context.Enable.?(gl.c.GL_FRAMEBUFFER_SRGB);
+    }
+    _ = dx.fns.?.unlock(dx.hdev, 1, &obj);
+    gl.glad.context.Flush.?();
+    dx.next ^= 1;
+    const t1: std.Io.Timestamp = .now(io, .awake);
+    return .{ .memory = .{
+        .width = w,
+        .height = h,
+        .pixels = try self.alloc.alloc(u8, 0),
+        .alloc = self.alloc,
+        .readback_ns = @intCast(@max(0, t0.durationTo(t1).nanoseconds)),
+        .shared = @as(u32, idx) + 1,
+    } };
+}
+
 fn swapWanted() bool {
     const v = std.c.getenv("GHOSTTY_PRESENT") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "swap");
@@ -393,6 +567,11 @@ pub fn present(
         }
     }
 
+    // The interop path (the host's D3D11 textures), when it has set them.
+    if (comptime Device.api == .wgl) {
+        if (try self.dxPresent(target)) |frame| return frame;
+    }
+
     // The swap path: the frame goes to the window's back buffer (the
     // target's bytes are sRGB-encoded already, so the blit copies them as
     // they are) and is swapped; the host gets only its size and the cost.
@@ -485,6 +664,9 @@ pub const ExportedFrame = union(enum) {
         /// frame, then reading it back (glReadPixels).
         gpu_wait_ns: u64 = 0,
         readback_ns: u64 = 0,
+        /// The interop path: drawn into the host's shared texture
+        /// `shared - 1`, no pixels; 0 otherwise.
+        shared: u32 = 0,
 
         pub fn deinit(self: Memory) void {
             self.alloc.free(self.pixels);

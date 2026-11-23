@@ -2022,6 +2022,9 @@ pub const CAPI = struct {
         /// to finish it, then reading it back into CPU memory.
         gpu_wait_ns: u64 = 0,
         readback_ns: u64 = 0,
+        /// Drawn into the host's shared texture `shared - 1` (interop);
+        /// 0 otherwise.
+        shared: u32 = 0,
     };
 
     const FrameMemory = if (renderer.Renderer.ExportedFrame == void)
@@ -2060,8 +2063,26 @@ pub const CAPI = struct {
             .handle = box,
             .gpu_wait_ns = memory.gpu_wait_ns,
             .readback_ns = memory.readback_ns,
+            .shared = if (@hasField(@TypeOf(memory), "shared")) memory.shared else 0,
         };
         return true;
+    }
+
+    /// Windows, zero-copy (a): the D3D11 device and two textures the
+    /// renderer draws frames into (WGL_NV_DX_interop2) instead of reading
+    /// them back; null ones to stop. The host's thread; the renderer takes
+    /// them at its next frame. Frames drawn there come with `shared`.
+    export fn ghostty_surface_set_shared_textures(
+        surface: *Surface,
+        device: ?*anyopaque,
+        tex0: ?*anyopaque,
+        tex1: ?*anyopaque,
+        width: u32,
+        height: u32,
+    ) void {
+        const api = &surface.core_surface.renderer.api;
+        if (comptime @hasDecl(@TypeOf(api.*), "setSharedTextures"))
+            api.setSharedTextures(device, tex0, tex1, width, height);
     }
 
     /// Free a frame from `ghostty_surface_take_frame`.

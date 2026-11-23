@@ -536,6 +536,9 @@ typedef struct {
   // it, then reading it back into CPU memory (nanoseconds).
   uint64_t gpu_wait_ns;
   uint64_t readback_ns;
+  // Windows, zero-copy: drawn into the host's shared texture `shared - 1`
+  // (ghostty_surface_set_shared_textures), no pixels; 0 otherwise.
+  uint32_t shared;
 } ghostty_frame_s;
 
 typedef enum {
@@ -1227,6 +1230,15 @@ GHOSTTY_API ghostty_surface_config_s ghostty_surface_config_new();
 GHOSTTY_API ghostty_surface_t GHOSTTY_NULLABLE ghostty_surface_new(ghostty_app_t,
                                                      const ghostty_surface_config_s*);
 GHOSTTY_API void ghostty_surface_free(ghostty_surface_t);
+// Windows, zero-copy: the D3D11 device and two textures (ID3D11Device*,
+// ID3D11Texture2D*) the renderer draws frames into instead of reading them
+// back (WGL_NV_DX_interop2); NULL ones to stop.
+GHOSTTY_API void ghostty_surface_set_shared_textures(ghostty_surface_t,
+                                                     void* GHOSTTY_NULLABLE device,
+                                                     void* GHOSTTY_NULLABLE tex0,
+                                                     void* GHOSTTY_NULLABLE tex1,
+                                                     uint32_t width,
+                                                     uint32_t height);
 GHOSTTY_API void* GHOSTTY_NULLABLE ghostty_surface_userdata(ghostty_surface_t);
 GHOSTTY_API ghostty_app_t ghostty_surface_app(ghostty_surface_t);
 GHOSTTY_API ghostty_surface_config_s ghostty_surface_inherited_config(ghostty_surface_t, ghostty_surface_context_e);
