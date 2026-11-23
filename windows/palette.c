@@ -12,7 +12,8 @@
 // The commands are the config's command-palette-entry list, minus those
 // this host does not do yet (as macOS leaves out its own unsupported ones).
 
-#define PAL_ROW_H 40  // points: the title, the description under it
+#define PAL_ROW_H 40   // points: the title, the description under it
+#define PAL_HEAD_H 40  // points: the header, the slogan and the build line (as pys's help)
 
 typedef struct {
   WCHAR* title;
@@ -288,10 +289,38 @@ static LRESULT CALLBACK pal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         PostMessageW(h, WM_CLOSE, 0, 0);
       }
       return 0;
+    case WM_PAINT: {
+      // The header: the slogan quietly at the top right, the build under it
+      // (as pys's help).
+      PAINTSTRUCT ps;
+      HDC dc = BeginPaint(h, &ps);
+      RECT rc;
+      GetClientRect(h, &rc);
+      int m = (int)(8 * g_pal_frame->scale), line = (int)(PAL_HEAD_H * g_pal_frame->scale) / 2;
+      SetBkMode(dc, TRANSPARENT);
+      SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+      SelectObject(dc, g_pal_small);
+      int r = rc.right - 2 * m;
+      // The slogan when it fits whole, else the motto (pys's rule).
+      RECT need = {0, 0, 0, 0};
+      DrawTextW(dc, kSlogan, -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+      const WCHAR* text = need.right <= r - m ? kSlogan : kMotto;
+      // Right-aligned by measure: placed from the right edge by its own
+      // width (DT_RIGHT let the last glyph overhang the edge under Wine).
+      const WCHAR* lines[2] = {text, L"Ghostty for Windows " WIDEN(GHOSTTY_BUILD_TAG)};
+      for (int k = 0; k < 2; k++) {
+        SIZE sz;
+        GetTextExtentPoint32W(dc, lines[k], (int)wcslen(lines[k]), &sz);
+        TextOutW(dc, r - sz.cx, m / 2 + k * line + (line - sz.cy) / 2, lines[k], (int)wcslen(lines[k]));
+      }
+      EndPaint(h, &ps);
+      return 0;
+    }
     case WM_SIZE: {
       int w = LOWORD(lp), hh = HIWORD(lp), eh = (int)(30 * g_pal_frame->scale), m = (int)(8 * g_pal_frame->scale);
-      MoveWindow(g_pal_edit, m, m, w - 2 * m, eh, TRUE);
-      MoveWindow(g_pal_list, m, m + eh + m / 2, w - 2 * m, hh - eh - m * 2, TRUE);
+      int head = (int)(PAL_HEAD_H * g_pal_frame->scale);
+      MoveWindow(g_pal_edit, m, head + m, w - 2 * m, eh, TRUE);
+      MoveWindow(g_pal_list, m, head + m + eh + m / 2, w - 2 * m, hh - head - eh - m * 2, TRUE);
       return 0;
     }
     case WM_CLOSE:
@@ -335,7 +364,7 @@ void palette_toggle(Window* w) {
   g_pal_pane = w->id;
   RECT fr;
   GetWindowRect(f->hwnd, &fr);
-  int pw = (int)(560 * f->scale), ph = (int)(420 * f->scale);
+  int pw = (int)(560 * f->scale), ph = (int)((420 + PAL_HEAD_H) * f->scale);
   int x = fr.left + ((fr.right - fr.left) - pw) / 2, y = fr.top + (int)(48 * f->scale);
   g_pal = CreateWindowExW(WS_EX_TOOLWINDOW, L"GhosttyPalette", L"Command palette",
                           WS_POPUP | WS_BORDER, x, y, pw, ph, f->hwnd, NULL, g_inst, NULL);
