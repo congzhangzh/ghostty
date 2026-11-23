@@ -49,11 +49,11 @@ void about_menu_add(HWND hwnd) {
   HMENU m = GetSystemMenu(hwnd, FALSE);
   if (!m) return;
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(m, MF_STRING, IDM_ABOUT, L"About Ghostty for Windows…");
-  AppendMenuW(m, MF_STRING, IDM_WHATSNEW, L"What's new…");
+  AppendMenuW(m, MF_STRING, IDM_ABOUT, tr(L"About Ghostty for Windows…"));
+  AppendMenuW(m, MF_STRING, IDM_WHATSNEW, tr(L"What's new…"));
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(m, MF_STRING, IDM_OPEN_CONFIG, L"Open config…");
-  AppendMenuW(m, MF_STRING, IDM_RELOAD_CONFIG, L"Reload config");
+  AppendMenuW(m, MF_STRING, IDM_OPEN_CONFIG, tr(L"Open config…"));
+  AppendMenuW(m, MF_STRING, IDM_RELOAD_CONFIG, tr(L"Reload config"));
   theme_menu_add(m);  // Theme ▸ (theme.c)
 }
 

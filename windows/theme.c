@@ -339,7 +339,7 @@ bool theme_timer(Frame* f, WPARAM id) {
 // (for a pair chosen later); on a single theme the title bar says why
 // nothing changed.
 void scheme_cycle(void) {
-  static const WCHAR* const names[] = {L"Auto", L"Light", L"Dark"};
+  const WCHAR* const names[] = {tr(L"Auto"), tr(L"Light"), tr(L"Dark")};
   set_scheme_mode((scheme_mode() + 1) % 3);
   char theme[512];
   theme_in_use(theme, sizeof(theme));
@@ -347,7 +347,7 @@ void scheme_cycle(void) {
   if (theme_value_pair(theme))
     swprintf(text, 200, L"%ls", names[scheme_mode()]);
   else
-    swprintf(text, 200, L"%ls: this theme has no light/dark pair (Theme menu: pick a pair)",
+    swprintf(text, 200, tr(L"%ls: this theme has no light/dark pair (Theme menu: pick a pair)"),
              names[scheme_mode()]);
   hint_show(text);
 }
@@ -384,17 +384,19 @@ static void choose_theme(const char* name) {
 void theme_menu_add(HMENU sys) {
   HMENU m = CreatePopupMenu();
   if (!m) return;
-  AppendMenuW(m, MF_STRING, IDM_THEME_DEFAULT, L"Default (from my config)");
+  AppendMenuW(m, MF_STRING, IDM_THEME_DEFAULT, tr(L"Default (from my config)"));
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
   for (int i = 0; i < NFAV; i++)
     if (theme_exists(kPairs[i].light) && theme_exists(kPairs[i].dark))
       AppendMenuW(m, MF_STRING, IDM_THEME_FAV + i * 0x10, kPairs[i].label);
-  AppendMenuW(m, MF_STRING, IDM_THEME_MORE, L"More themes\u2026");
+  AppendMenuW(m, MF_STRING, IDM_THEME_MORE, tr(L"More themes\u2026"));
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(m, MF_STRING, IDM_SCHEME_AUTO, L"Auto (follow Windows)\tCtrl+Shift+F12");
-  AppendMenuW(m, MF_STRING, IDM_SCHEME_LIGHT, L"Light");
-  AppendMenuW(m, MF_STRING, IDM_SCHEME_DARK, L"Dark");
-  AppendMenuW(sys, MF_POPUP, (UINT_PTR)m, L"Theme");
+  WCHAR autos[96];
+  swprintf(autos, 96, L"%ls\tCtrl+Shift+F12", tr(L"Auto (follow Windows)"));
+  AppendMenuW(m, MF_STRING, IDM_SCHEME_AUTO, autos);
+  AppendMenuW(m, MF_STRING, IDM_SCHEME_LIGHT, tr(L"Light"));
+  AppendMenuW(m, MF_STRING, IDM_SCHEME_DARK, tr(L"Dark"));
+  AppendMenuW(sys, MF_POPUP, (UINT_PTR)m, tr(L"Theme"));
   theme_menu_update(sys);
 }
 
@@ -412,10 +414,11 @@ void theme_menu_update(HMENU sys) {
     fav = fav || on;
     CheckMenuItem(sys, IDM_THEME_FAV + i * 0x10, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
   }
-  WCHAR more[320] = L"More themes\u2026";
+  WCHAR more[320];
+  swprintf(more, 320, L"%ls", tr(L"More themes\u2026"));
   if (name[0] && !fav) {
     WCHAR* w = utf8_to_utf16(name, -1);
-    if (w) swprintf(more, 320, L"More themes\u2026 (%ls)", w);
+    if (w) swprintf(more, 320, L"%ls (%ls)", tr(L"More themes\u2026"), w);
     free(w);
   }
   ModifyMenuW(sys, IDM_THEME_MORE, MF_BYCOMMAND | MF_STRING | (name[0] && !fav ? MF_CHECKED : 0),

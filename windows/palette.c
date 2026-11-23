@@ -18,6 +18,8 @@
 typedef struct {
   WCHAR* title;
   WCHAR* desc;
+  WCHAR* en;  // the English title and description, searched too (a translated list
+              // still finds "split")
   WCHAR key[48];
   char* action;  // NULL: a jump
   int pane;      // a jump's pane id
@@ -51,6 +53,7 @@ static void items_free(void) {
   for (int i = 0; i < g_nitems; i++) {
     free(g_items[i].title);
     free(g_items[i].desc);
+    free(g_items[i].en);
     free(g_items[i].action);
   }
   free(g_items);
@@ -58,7 +61,14 @@ static void items_free(void) {
   g_nitems = 0;
 }
 
+static void items_add_en(const WCHAR* title, const WCHAR* desc, const WCHAR* en_title,
+                         const WCHAR* en_desc, const char* action, int pane);
 static void items_add(const WCHAR* title, const WCHAR* desc, const char* action, int pane) {
+  items_add_en(title, desc, NULL, NULL, action, pane);
+}
+
+static void items_add_en(const WCHAR* title, const WCHAR* desc, const WCHAR* en_title,
+                         const WCHAR* en_desc, const char* action, int pane) {
   PalItem* p = realloc(g_items, (size_t)(g_nitems + 1) * sizeof(PalItem));
   if (!p) return;
   g_items = p;
@@ -67,6 +77,11 @@ static void items_add(const WCHAR* title, const WCHAR* desc, const char* action,
   it->title = _wcsdup(title ? title : L"");
   it->desc = _wcsdup(desc ? desc : L"");
   it->action = action ? _strdup(action) : NULL;
+  if (en_title) {
+    size_t n = wcslen(en_title) + (en_desc ? wcslen(en_desc) : 0) + 2;
+    it->en = malloc(n * sizeof(WCHAR));
+    if (it->en) swprintf(it->en, n, L"%ls %ls", en_title, en_desc ? en_desc : L"");
+  }
   it->pane = pane;
   if (action && g_config) {
     ghostty_input_trigger_s t = ghostty_config_trigger(g_config, action, strlen(action));
@@ -78,7 +93,7 @@ static void items_load(Frame* f) {
   items_free();
   // In full screen: the way back first (the owner's "Exit full screen — F11").
   if (f && f->fullscreen && !f->quick) {
-    items_add(L"Exit full screen", L"Back to the window", "toggle_fullscreen", 0);
+    items_add(tr(L"Exit full screen"), tr(L"Back to the window"), "toggle_fullscreen", 0);
     if (g_nitems) wcscpy(g_items[g_nitems - 1].key, L"F11");
   }
   ghostty_config_command_list_s list = {0};
@@ -89,7 +104,7 @@ static void items_load(Frame* f) {
       if (!c->action || !c->action_key || !supported(c->action_key)) continue;
       WCHAR* t = utf8_to_utf16(c->title ? c->title : "", -1);
       WCHAR* d = utf8_to_utf16(c->description ? c->description : "", -1);
-      items_add(t, d, c->action, 0);
+      items_add_en(tr(t), tr(d), t, d, c->action, 0);  // Ghostty's own translations (po/)
       free(t);
       free(d);
     }
@@ -102,8 +117,9 @@ static void items_load(Frame* f) {
       if (n <= 0) panes[0] = f->tabs[i], n = 1;
       for (int p = 0; p < n && p < 64; p++) {
         WCHAR title[300];
-        swprintf(title, 300, L"Focus: %ls", panes[p]->title && *panes[p]->title ? panes[p]->title : L"Untitled");
-        items_add(title, L"Jump to this terminal", NULL, panes[p]->id);
+        swprintf(title, 300, L"%ls%ls", tr(L"Focus: "),
+                 panes[p]->title && *panes[p]->title ? panes[p]->title : tr(L"Untitled"));
+        items_add(title, tr(L"Jump to this terminal"), NULL, panes[p]->id);
       }
     }
 }
@@ -112,8 +128,8 @@ static void items_load(Frame* f) {
 
 static bool matches(const PalItem* it, const WCHAR* q) {
   if (!*q) return true;
-  WCHAR a[600];
-  swprintf(a, 600, L"%ls %ls", it->title, it->desc);
+  WCHAR a[1200];
+  swprintf(a, 1200, L"%ls %ls %ls", it->title, it->desc, it->en ? it->en : L"");
   _wcslwr(a);
   WCHAR lq[128];
   wcsncpy(lq, q, 127);
@@ -381,7 +397,7 @@ void palette_toggle(Window* w) {
                                    LBS_OWNERDRAWFIXED,
                                0, 0, 0, 0, g_pal, NULL, g_inst, NULL);
   SendMessageW(g_pal_edit, WM_SETFONT, (WPARAM)g_pal_font, TRUE);
-  SendMessageW(g_pal_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Type a command, or a terminal's title");
+  SendMessageW(g_pal_edit, EM_SETCUEBANNER, TRUE, (LPARAM)tr(L"Type a command, or a terminal's title"));
   g_pal_edit_proc = (WNDPROC)SetWindowLongPtrW(g_pal_edit, GWLP_WNDPROC, (LONG_PTR)pal_edit_proc);
   fill();
   RECT rc;
@@ -396,7 +412,7 @@ void palette_toggle(Window* w) {
     jumps += g_items[i].action == NULL;
   }
   char ev[160];
-  snprintf(ev, sizeof(ev), "{\"kind\":\"palette\",\"what\":\"opened\",\"items\":%d,\"with_key\":%d,\"jumps\":%d}",
-           g_nitems, keyed, jumps);
+  snprintf(ev, sizeof(ev), "{\"kind\":\"palette\",\"what\":\"opened\",\"items\":%d,\"with_key\":%d,\"jumps\":%d,\"lang\":\"%s\"}",
+           g_nitems, keyed, jumps, tr_lang());
   test_event(ev);
 }

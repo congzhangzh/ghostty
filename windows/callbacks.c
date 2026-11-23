@@ -103,8 +103,8 @@ void confirm_read_clipboard_cb(void* ud,
                                       ghostty_clipboard_request_e req) {
   Window* w = ud;
   const WCHAR* what = req == GHOSTTY_CLIPBOARD_REQUEST_PASTE
-                          ? L"The text you are pasting may run commands. Paste it?"
-                          : L"A program in the terminal wants to read the clipboard. Allow it?";
+                          ? tr(L"The text you are pasting may run commands. Paste it?")
+                          : tr(L"A program in the terminal wants to read the clipboard. Allow it?");
   int r = MessageBoxW(w->frame->hwnd, what, L"Ghostty", MB_YESNO | MB_ICONWARNING);
   if (r == IDYES) {
     ghostty_clipboard_complete_s done = {c->contents, c->contents_len,
@@ -126,7 +126,7 @@ void write_clipboard_cb(void* ud, ghostty_clipboard_e which,
       continue;
     if (confirm &&
         MessageBoxW(w->frame->hwnd,
-                    L"A program in the terminal wants to set the clipboard. Allow it?",
+                    tr(L"A program in the terminal wants to set the clipboard. Allow it?"),
                     L"Ghostty", MB_YESNO | MB_ICONWARNING) != IDYES)
       return;
     set_clipboard_text(w->hwnd, contents[i].data, contents[i].len);

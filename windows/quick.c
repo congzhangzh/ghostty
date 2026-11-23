@@ -341,7 +341,7 @@ void quick_hotkey_update(void) {
     if (!said) {
       said = true;
       WCHAR text[160];
-      swprintf(text, 160, L"Quick Terminal key %ls is used by another app", name);
+      swprintf(text, 160, tr(L"Quick Terminal key %ls is used by another app"), name);
       hint_show(text);
     }
   }

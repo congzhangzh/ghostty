@@ -345,6 +345,8 @@ void quick_hotkey_update(void);
 bool quick_hotkey(WPARAM id);
 const WCHAR* theme_hint(void);
 void hint_show(const WCHAR* text);
+const WCHAR* tr(const WCHAR* en);  // the display language's text (i18n.c)
+const char* tr_lang(void);
 bool host_ini_get(const char* key, char* out, size_t cap);
 void host_ini_set(const char* key, const char* value);  // a line in the title bar for a few seconds (theme.c)
 bool theme_timer(Frame* f, WPARAM id);

@@ -166,7 +166,7 @@ void reveal_fullscreen(Frame* f, bool on) {
   char seen[16];
   if (!host_ini_get("fullscreen_hint", seen, sizeof(seen))) {
     host_ini_set("fullscreen_hint", "seen");
-    hint_show(L"Move the mouse to the top for tabs and ?, F11 to exit");
+    hint_show(tr(L"Move the mouse to the top for tabs and ?, F11 to exit"));
     reveal_show(f);
     f->reveal_hold = GetTickCount64() + 3000;
   }
