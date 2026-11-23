@@ -106,6 +106,29 @@ static void copy_utf8(WCHAR* dst, size_t n, const char* s) {
   free(w);
 }
 
+// A JSON string of `s` into dst (quotes included), for test_event.
+static void json_str(char* dst, size_t n, const char* s) {
+  size_t o = 0;
+  if (n < 3) return;
+  dst[o++] = '"';
+  for (; s && *s && o + 8 < n; s++) {
+    unsigned char c = (unsigned char)*s;
+    if (c == '"' || c == '\\') o += (size_t)snprintf(dst + o, n - o, "\\%c", c);
+    else if (c < 0x20) o += (size_t)snprintf(dst + o, n - o, "\\u%04x", c);
+    else dst[o++] = (char)c;
+  }
+  dst[o++] = '"';
+  dst[o] = 0;
+}
+
+// A window's index in g_frames, as the test pipe's "list" numbers them.
+static int frame_index(Frame* f) {
+  int i = 0;
+  for (Frame* g = g_frames; g; g = g->next, i++)
+    if (g == f) return i;
+  return -1;
+}
+
 void notify_toast(Window* w, const char* title, const char* body) {
   if (!w) return;
   Frame* f;
@@ -114,6 +137,15 @@ void notify_toast(Window* w, const char* title, const char* body) {
   bool seen = GetForegroundWindow() == f->hwnd && f->active == i;
   fprintf(stderr, "ghostty: notify: \"%s\" / \"%s\" %s\n", title ? title : "", body ? body : "",
           seen ? "not shown: its tab is the selected tab of the foreground window" : "shown");
+  {
+    char t[600], bd[1200], ev[2048];
+    json_str(t, sizeof t, title);
+    json_str(bd, sizeof bd, body);
+    snprintf(ev, sizeof ev, "{\"kind\":\"notification\",\"window\":%d,\"title\":%s,\"body\":%s,\"shown\":%s,\"why\":\"%s\"}",
+             frame_index(f), t, bd, seen ? "false" : "true",
+             seen ? "its tab is the selected tab of the foreground window" : "");
+    test_event(ev);
+  }
   if (seen || !notify_window()) return;
 
   NOTIFYICONDATAW nid = {
@@ -232,9 +264,13 @@ static TBPFLAG flag_of(ghostty_action_progress_report_state_e s) {
   }
 }
 
-// Shows on `f`'s taskbar button the progress its tabs report.
-static void apply(Frame* f) {
-  if (!f || !f->hwnd || f->destroying) return;
+static const char* flag_name(TBPFLAG flag) {
+  return flag == TBPF_NORMAL ? "normal" : flag == TBPF_ERROR ? "error" : flag == TBPF_PAUSED ? "paused" : flag == TBPF_INDETERMINATE ? "indeterminate" : "none";
+}
+
+// What `f`'s taskbar button should show: the selected tab's progress, or the
+// most severe of its other tabs'. *value: 0-100, or -1 for none.
+static TBPFLAG wanted(Frame* f, int* value) {
   TabProgress* pick = NULL;
   if (f->active >= 0 && f->active < f->ntabs) {
     TabProgress* p = progress_of(f->tabs[f->active]);
@@ -246,7 +282,24 @@ static void apply(Frame* f) {
       if (p && severity(p->state) > (pick ? severity(pick->state) : 0)) pick = p;
     }
   TBPFLAG flag = pick ? flag_of(pick->state) : TBPF_NOPROGRESS;
-  int value = pick && flag != TBPF_INDETERMINATE && flag != TBPF_NOPROGRESS ? pick->value : -1;
+  *value = pick && flag != TBPF_INDETERMINATE && flag != TBPF_NOPROGRESS ? pick->value : -1;
+  return flag;
+}
+
+// For the test pipe's "list": the progress `f`'s button should show ("normal",
+// "error", "paused", "indeterminate"), or NULL for none; *value as wanted().
+const char* notify_progress_state(Frame* f, int* value) {
+  int v = -1;
+  TBPFLAG flag = f && f->hwnd && !f->destroying ? wanted(f, &v) : TBPF_NOPROGRESS;
+  if (value) *value = v;
+  return flag == TBPF_NOPROGRESS ? NULL : flag_name(flag);
+}
+
+// Shows on `f`'s taskbar button the progress its tabs report.
+static void apply(Frame* f) {
+  if (!f || !f->hwnd || f->destroying) return;
+  int value;
+  TBPFLAG flag = wanted(f, &value);
 
   Shown* s = NULL;
   for (int i = 0; i < g_nshown; i++)
@@ -255,14 +308,19 @@ static void apply(Frame* f) {
   if (!s && flag == TBPF_NOPROGRESS) return;  // nothing shown, nothing to show
 
   ITaskbarList3* tb = taskbar();
+  {
+    char ev[160];
+    snprintf(ev, sizeof ev, "{\"kind\":\"progress\",\"window\":%d,\"state\":\"%s\",\"value\":%d,\"taskbar\":%s}",
+             frame_index(f), flag_name(flag), value, tb ? "true" : "false");
+    test_event(ev);
+  }
   if (!tb) return;
   HRESULT hr = tb->lpVtbl->SetProgressState(tb, f->hwnd, flag);
   if (SUCCEEDED(hr) && value >= 0) hr = tb->lpVtbl->SetProgressValue(tb, f->hwnd, (ULONGLONG)value, 100);
   char num[8] = "";
   if (value >= 0) snprintf(num, sizeof num, " %d", value);
   fprintf(stderr, "ghostty: notify: taskbar progress %s%s (HRESULT 0x%08lx) on window %p%s\n",
-          flag == TBPF_NORMAL ? "normal" : flag == TBPF_ERROR ? "error" : flag == TBPF_PAUSED ? "paused" : flag == TBPF_INDETERMINATE ? "indeterminate" : "none",
-          num, (unsigned long)hr, (void*)f->hwnd, IsWindowVisible(f->hwnd) ? "" : " (not visible)");
+          flag_name(flag), num, (unsigned long)hr, (void*)f->hwnd, IsWindowVisible(f->hwnd) ? "" : " (not visible)");
 
   if (flag == TBPF_NOPROGRESS) {
     if (s) *s = g_shown[--g_nshown];

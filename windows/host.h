@@ -295,6 +295,7 @@ void glcheck_explain(void);
 void notify_toast(Window* w, const char* title, const char* body);
 void notify_progress(Window* w, ghostty_action_progress_report_s r);
 void notify_frame_changed(Frame* f);
+const char* notify_progress_state(Frame* f, int* value);  // for the test pipe's "list"
 void notify_tab_closed(Window* w);
 bool notify_frame_msg(HWND hwnd, UINT msg);
 Frame* new_frame(void);
