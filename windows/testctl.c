@@ -279,7 +279,16 @@ static void cmd_list(Line* b) {
         wi ? "," : "", wi, GetForegroundWindow() == f->hwnd ? "true" : "false",
         f->fullscreen ? "true" : "false", IsZoomed(f->hwnd) ? "true" : "false");
     put_rect(b, f->hwnd);
-    put(b, ",\"progress\":null,\"tabs\":[");
+    int pv = -1;
+    const char* ps = notify_progress_state(f, &pv);  // notify.c: NULL for none
+    if (ps) {
+      put(b, ",\"progress\":{\"state\":");
+      put_string(b, ps);
+      put(b, ",\"value\":%d}", pv);
+    } else {
+      put(b, ",\"progress\":null");
+    }
+    put(b, ",\"tabs\":[");
     for (int i = 0; i < f->ntabs; i++) {
       Window* focused = f->tabs[i];
       put(b, "%s{\"selected\":%s,\"title\":", i ? "," : "", i == f->active ? "true" : "false");
