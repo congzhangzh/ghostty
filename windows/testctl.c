@@ -12,7 +12,7 @@
 //
 // A request is one JSON line, the answer one JSON line, in order; a client
 // may send many. Commands (protocol 1, agreed with the e2e driver):
-//   hello, list, text, key, action, read, screenshot, stats, window, events
+//   hello, list, text, key, action, read, screenshot, stats, window, events, menu
 // They run on the UI thread (posted to the wakeup window, answered within
 // 5 s or "ui timeout"); a screenshot is then taken from the screen by the
 // pipe's thread, after a frame, so it shows what was presented in either
@@ -459,6 +459,43 @@ static bool cmd_window(const JObj* o, Line* b) {
   return true;
 }
 
+// "menu": the window menu as it would show (submenus flattened, depth
+// given), each item's id, text and check mark.
+static void menu_items(Line* b, HMENU m, int depth, bool* first) {
+  int n = GetMenuItemCount(m);
+  for (int i = 0; i < n; i++) {
+    WCHAR text[320] = L"";
+    MENUITEMINFOW mi = {sizeof(mi)};
+    mi.fMask = MIIM_ID | MIIM_STATE | MIIM_SUBMENU | MIIM_FTYPE | MIIM_STRING;
+    mi.dwTypeData = text;
+    mi.cch = 320;
+    if (!GetMenuItemInfoW(m, (UINT)i, TRUE, &mi) || (mi.fType & MFT_SEPARATOR)) continue;
+    char* t = utf16_to_utf8(text, -1);
+    put(b, "%s{\"id\":%u,\"depth\":%d,\"checked\":%s,\"grayed\":%s,\"text\":", *first ? "" : ",",
+        mi.wID, depth, (mi.fState & MFS_CHECKED) ? "true" : "false",
+        (mi.fState & MFS_GRAYED) ? "true" : "false");
+    put_string(b, t ? t : "");
+    put(b, "}");
+    free(t);
+    *first = false;
+    if (mi.hSubMenu) menu_items(b, mi.hSubMenu, depth + 1, first);
+  }
+}
+
+static bool cmd_menu(const JObj* o, Line* b) {
+  Frame* f = target_frame(o);
+  HMENU m = f ? GetSystemMenu(f->hwnd, FALSE) : NULL;
+  if (!m) {
+    put(b, ",\"error\":\"menu: none\"");
+    return false;
+  }
+  put(b, ",\"items\":[");
+  bool first = true;
+  menu_items(b, m, 0, &first);
+  put(b, "]");
+  return true;
+}
+
 static void cmd_events(const JObj* o, Line* b) {
   long since = 0;
   jint(o, "since", &since);
@@ -507,6 +544,8 @@ LRESULT testctl_ui(LPARAM lp) {
   } else if (strcmp(cmd, "stats") == 0) {
     put(b, ",\"stats\":");
     stats_json(b);
+  } else if (strcmp(cmd, "menu") == 0) {
+    ok = cmd_menu(&o, b);
   } else if (strcmp(cmd, "events") == 0) {
     cmd_events(&o, b);
   } else if (strcmp(cmd, "window") == 0) {

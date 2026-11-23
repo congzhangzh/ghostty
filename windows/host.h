@@ -36,6 +36,7 @@
 #include <io.h>
 
 #include <signal.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -120,6 +121,7 @@ struct Window {
   // The renderer draws into this window itself (GHOSTTY_PRESENT=swap):
   // frames come without pixels, and the host paints nothing over them.
   bool swap;
+  bool ate_f12;  // Ctrl+Shift+F12 went to the host: its release too
 
   // A high surrogate from WM_CHAR waiting for its low half.
   WCHAR high_surrogate;
@@ -285,7 +287,15 @@ void testctl_start(void);
 bool ctl_client_mode(int argc, char** argv, int* rc);
 LRESULT testctl_ui(LPARAM req);
 void test_event(const char* json_object);
+ghostty_config_t config_load_with(const char* theme_file);
 void config_reload(ghostty_surface_t surface, bool soft);
+char* theme_config_file(void);
+int scheme_mode(void);
+void scheme_cycle(void);
+void theme_menu_add(HMENU sys);
+void theme_menu_update(HMENU sys);
+bool theme_command(HWND hwnd, WPARAM wp);
+void theme_picker_open(Frame* f);
 void config_changed(ghostty_config_t config);
 void config_open(void);
 void color_scheme_apply(void);

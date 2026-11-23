@@ -143,6 +143,7 @@ void show_window_menu(Frame* f, int x, int y) {
   EnableMenuItem(m, SC_SIZE, MF_BYCOMMAND | (fixed ? MF_GRAYED : MF_ENABLED));
   EnableMenuItem(m, SC_MINIMIZE, MF_BYCOMMAND | MF_ENABLED);
   EnableMenuItem(m, SC_MAXIMIZE, MF_BYCOMMAND | (fixed ? MF_GRAYED : MF_ENABLED));
+  theme_menu_update(m);  // check marks on the theme and Auto / Light / Dark
   SetForegroundWindow(f->hwnd);  // else the menu does not close on a click away
   UINT align = GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN;
   int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | align, x, y, 0,
@@ -283,7 +284,7 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (titlebar_active(f)) return titlebar_hit(f, wp, lp);
       break;
     case WM_SYSCOMMAND:
-      if (about_command(hwnd, wp)) return 0;
+      if (about_command(hwnd, wp) || theme_command(hwnd, wp)) return 0;
       break;
     // Windows' caption buttons when DwmDefWindowProc did not take the click:
     // the press is ours (DefWindowProc would draw a classic button), the

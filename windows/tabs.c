@@ -886,10 +886,22 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Let Windows have Alt+F4 and Alt+Space (the window menu); for a
       // child window DefWindowProc hands them to the top-level window.
       if (msg == WM_SYSKEYDOWN && (wp == VK_F4 || wp == VK_SPACE)) break;
+      // Ctrl+Shift+F12: Auto / Light / Dark (theme.c), the host's own key;
+      // Ghostty binds nothing to F12. Its release is kept from the core too.
+      if (wp == VK_F12 && (GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
+          !(GetKeyState(VK_MENU) & 0x8000)) {
+        if (!(lp & (1 << 30))) scheme_cycle();  // not on auto-repeat
+        w->ate_f12 = true;
+        return 0;
+      }
       handle_key(w, msg, wp, lp);
       return 0;
     case WM_KEYUP:
     case WM_SYSKEYUP:
+      if (wp == VK_F12 && w->ate_f12) {
+        w->ate_f12 = false;
+        return 0;
+      }
       handle_key(w, msg, wp, lp);
       if (msg == WM_SYSKEYUP && wp == VK_MENU) return 0;  // no menu focus
       break;

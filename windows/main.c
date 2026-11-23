@@ -71,12 +71,18 @@ static bool buildinfo_mode(int argc, char** argv) {
 // ---------------------------------------------------------------------------
 // Config the host reads
 
-// The config as Ghostty loads it: the default files, the command line, the
-// files they include; its problems on stderr.
-static ghostty_config_t config_load(void) {
+// The config as Ghostty loads it: the default files, the theme chosen in
+// the window menu (theme.c: theme.ghostty), the command line, the files
+// they include; its problems on stderr. theme_file: NULL for the chosen
+// one, "" for none, else that file (the picker's preview).
+ghostty_config_t config_load_with(const char* theme_file) {
   ghostty_config_t c = ghostty_config_new();
   if (!c) return NULL;
   ghostty_config_load_default_files(c);
+  char* chosen = theme_file ? NULL : theme_config_file();
+  const char* t = theme_file ? theme_file : chosen;
+  if (t && *t) ghostty_config_load_file(c, t);
+  free(chosen);
   ghostty_config_load_cli_args(c);
   ghostty_config_load_recursive_files(c);
   ghostty_config_finalize(c);
@@ -86,6 +92,8 @@ static ghostty_config_t config_load(void) {
   }
   return c;
 }
+
+static ghostty_config_t config_load(void) { return config_load_with(NULL); }
 
 // A config value that is a string (enums come back as their name), or NULL.
 static const char* config_string(const char* key) {
@@ -184,6 +192,9 @@ void config_open(void) {
 
 // Windows' app mode, light or dark (Settings > Personalization > Colors).
 ghostty_color_scheme_e color_scheme_now(void) {
+  int mode = scheme_mode();  // the window menu's Light / Dark / Auto
+  if (mode == 1) return GHOSTTY_COLOR_SCHEME_LIGHT;
+  if (mode == 2) return GHOSTTY_COLOR_SCHEME_DARK;
   DWORD light = 1, n = sizeof(light);
   if (RegGetValueW(HKEY_CURRENT_USER,
                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
