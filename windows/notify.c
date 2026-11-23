@@ -180,6 +180,12 @@ static const IID kIidUnknown = {0x00000000, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0
 
 static int g_toasts = -1;  // -1 not decided, 0 balloons only, 1 toasts
 
+// The runtime classes, by name. Their lengths are taken with wcslen, never counted by hand
+// (the first version passed 48 for the manager's 49 characters: "class not registered").
+static const WCHAR kToastManager[] = L"Windows.UI.Notifications.ToastNotificationManager";
+static const WCHAR kXmlDocument[] = L"Windows.Data.Xml.Dom.XmlDocument";
+static const WCHAR kToastNotification[] = L"Windows.UI.Notifications.ToastNotification";
+
 // combase.dll's WinRT functions, loaded when toasts are first wanted: the host links no WinRT
 // import library, and a Windows without them keeps balloons.
 static struct {
@@ -282,7 +288,7 @@ static void toasts_init(void) {
   HRESULT ro = g_ro.Initialize(RO_INIT_SINGLETHREADED);  // the UI thread; S_FALSE or RPC_E_CHANGED_MODE when COM is up already
   HSTRING cls = NULL, id = NULL;
   ToastManagerStatics* statics = NULL;
-  HRESULT h2 = g_ro.CreateString(L"Windows.UI.Notifications.ToastNotificationManager", 48, &cls);
+  HRESULT h2 = g_ro.CreateString(kToastManager, (UINT32)wcslen(kToastManager), &cls);
   if (SUCCEEDED(h2)) h2 = g_ro.GetActivationFactory(cls, &kIidToastManagerStatics, (void**)&statics);
   if (SUCCEEDED(h2)) h2 = g_ro.CreateString(GHOSTTY_AUMID, (UINT32)wcslen(GHOSTTY_AUMID), &id);
   if (SUCCEEDED(h2)) h2 = statics->v->CreateToastNotifierWithId(statics, id, (void**)&g_notifier);
@@ -372,13 +378,13 @@ static HRESULT toast_show(Window* w, const char* title, const char* body) {
   void* doc = NULL;
   ToastFactory* factory = NULL;
   ToastNotification* toast = NULL;
-  HRESULT hr = g_ro.CreateString(L"Windows.Data.Xml.Dom.XmlDocument", 32, &cls_doc);
+  HRESULT hr = g_ro.CreateString(kXmlDocument, (UINT32)wcslen(kXmlDocument), &cls_doc);
   if (SUCCEEDED(hr)) hr = g_ro.ActivateInstance(cls_doc, (void**)&insp);
   if (SUCCEEDED(hr)) hr = ((IInspectableVtblHead*)*(void**)insp)->QueryInterface(insp, &kIidXmlDocumentIO, (void**)&io);
   if (SUCCEEDED(hr)) hr = g_ro.CreateString(xml, (UINT32)wcslen(xml), &hxml);
   if (SUCCEEDED(hr)) hr = io->v->LoadXml(io, hxml);
   if (SUCCEEDED(hr)) hr = io->v->h.QueryInterface(io, &kIidXmlDocument, &doc);
-  if (SUCCEEDED(hr)) hr = g_ro.CreateString(L"Windows.UI.Notifications.ToastNotification", 42, &cls_toast);
+  if (SUCCEEDED(hr)) hr = g_ro.CreateString(kToastNotification, (UINT32)wcslen(kToastNotification), &cls_toast);
   if (SUCCEEDED(hr)) hr = g_ro.GetActivationFactory(cls_toast, &kIidToastFactory, (void**)&factory);
   if (SUCCEEDED(hr)) hr = factory->v->CreateToastNotification(factory, doc, (void**)&toast);
   if (SUCCEEDED(hr)) {
