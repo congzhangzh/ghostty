@@ -62,6 +62,9 @@ static void frame_tick(Frame* f, double dt_ms) {
     w->blit_avg_ms = w->tick_frames ? w->tick_blit_ms / w->tick_frames : 0;
     w->gpu_wait_avg_ms = w->tick_frames ? w->tick_gpu_wait_ms / w->tick_frames : 0;
     w->readback_avg_ms = w->tick_frames ? w->tick_readback_ms / w->tick_frames : 0;
+    w->wait_avg_ms = w->tick_frames ? w->tick_wait_ms / w->tick_frames : 0;
+    w->present_avg_ms = w->tick_frames ? w->tick_present_ms / w->tick_frames : 0;
+    w->tick_wait_ms = w->tick_present_ms = 0;
     w->tick_frames = 0;
     w->tick_swizzle_ms = w->tick_blit_ms = 0;
     w->tick_gpu_wait_ms = w->tick_readback_ms = 0;
@@ -127,6 +130,7 @@ void stats_json(Line* b0) {
   put(&b, ",\"cpu_pct\":%.1f,\"ws_mb\":%.1f,\"private_mb\":%.1f,\"gl\":",
       g_cpu_pct, g_ws_mb, g_private_mb);
   put_string(&b, gl_driver());
+  present_stats_json(&b);  // the interop probe, the DXGI adapter (dxgi.c)
   put(&b, ",\"windows\":[");
   int fi = 0;
   for (Frame* f = g_frames; f; f = f->next, fi++) {
@@ -138,16 +142,16 @@ void stats_json(Line* b0) {
       char* title = w->title ? utf16_to_utf8(w->title, -1) : NULL;
       put(&b, "%s{\"selected\":%s,\"present\":\"%s\",\"title\":",
           i ? "," : "", i == f->active ? "true" : "false",
-          w->swap ? "swap" : "copy");
+          w->swap ? "swap" : w->dxgi ? "dxgi" : "copy");
       put_string(&b, title ? title : "");
       free(title);
       put(&b,
           ",\"fps\":%.1f,\"key_ms\":%.1f,\"gpu_wait_ms\":%.3f,"
           "\"readback_ms\":%.3f,\"swizzle_ms\":%.3f,"
-          "\"blit_ms\":%.3f,\"frame\":[%u,%u],\"grid\":[%u,%u],"
+          "\"blit_ms\":%.3f,\"wait_ms\":%.3f,\"present_ms\":%.3f,\"frame\":[%u,%u],\"grid\":[%u,%u],"
           "\"cell\":[%u,%u]}",
           w->fps, w->latency_ms, w->gpu_wait_avg_ms, w->readback_avg_ms,
-          w->swizzle_avg_ms, w->blit_avg_ms, w->frame_w,
+          w->swizzle_avg_ms, w->blit_avg_ms, w->wait_avg_ms, w->present_avg_ms, w->frame_w,
           w->frame_h, sz.columns, sz.rows, sz.cell_width_px, sz.cell_height_px);
     }
     put(&b, "]}");

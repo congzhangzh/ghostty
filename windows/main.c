@@ -251,6 +251,7 @@ int main(int argc, char** argv) {
   if (stats_client_mode(argc, argv, &rc)) return rc;
   if (ctl_client_mode(argc, argv, &rc)) return rc;
   stderr_guard_start();
+  present_mode_resolve();  // GHOSTTY_PRESENT=interop: kept, or swap (dxgi.c)
   g_main_tid = GetCurrentThreadId();
   LARGE_INTEGER freq;
   QueryPerformanceFrequency(&freq);

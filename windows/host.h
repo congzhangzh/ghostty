@@ -143,6 +143,13 @@ struct Window {
   uint32_t tick_frames;
   double tick_swizzle_ms, tick_blit_ms;
   double tick_gpu_wait_ms, tick_readback_ms;  // the render thread's, per frame taken
+  // The DXGI path (dxgi.c): the pane's flip swap chain, its latency object,
+  // its size; the time waiting for room and presenting, per frame.
+  bool dxgi;
+  void* dxgi_chain;
+  HANDLE dxgi_wait;
+  UINT dxgi_w, dxgi_h;
+  double tick_wait_ms, tick_present_ms, wait_avg_ms, present_avg_ms;
   uint64_t key_qpc;        // a key went down, no frame taken since
   uint64_t frame_key_qpc;  // the frame shown now is the first after it
   double latency_ms;       // that key to the end of its frame's paint
@@ -219,6 +226,11 @@ WCHAR* utf8_to_utf16(const char* s, int len);
 void handle_key(Window* w, UINT msg, WPARAM vk, LPARAM lp);
 void handle_char(Window* w, WCHAR ch);
 bool ime_message(Window* w, UINT msg, WPARAM wp, LPARAM lp, LRESULT* out);
+void present_mode_resolve(void);
+bool present_dxgi_wanted(void);
+bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT stride);
+void dxgi_pane_gone(Window* w);
+extern const char* ghostty_windows_gl_driver(void);  // pkg/opengl/wgl.zig
 void drop_files(Window* w, HDROP drop);
 void mouse_pos(Window* w, LPARAM lp);
 void mouse_button(Window* w, ghostty_input_mouse_state_e state,
@@ -299,6 +311,7 @@ bool ctl_client_mode(int argc, char** argv, int* rc);
 LRESULT testctl_ui(LPARAM req);
 void test_event(const char* json_object);
 void ime_drive(Window* w, const char* comp, int commit, Line* b);
+void present_stats_json(Line* b);  // dxgi.c
 ghostty_config_t config_load_with(const char* theme_file);
 void config_reload(ghostty_surface_t surface, bool soft);
 char* theme_config_file(void);

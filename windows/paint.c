@@ -38,7 +38,10 @@ void take_frame(Window* w) {
   uint64_t t0 = qpc();
   for (uint32_t y = 0; y < f.height; y++) {
     const uint8_t* src = f.pixels + (size_t)y * f.stride;
-    uint8_t* dst = w->bgra + (size_t)y * f.width * 4;
+    // GL's rows come bottom first: GDI takes them so (a bottom-up DIB);
+    // a D3D texture is top first, so the DXGI path writes them reversed.
+    uint32_t row = w->dxgi ? f.height - 1 - y : y;
+    uint8_t* dst = w->bgra + (size_t)row * f.width * 4;
     for (uint32_t x = 0; x < f.width; x++) {
       dst[0] = src[2];
       dst[1] = src[1];
@@ -58,14 +61,19 @@ void take_frame(Window* w) {
   }
   w->frame_w = f.width;
   w->frame_h = f.height;
+  // The DXGI path: on screen now, no GDI paint (a failure: GDI from now on).
+  if (w->dxgi && dxgi_present(w, w->bgra, f.width, f.height, f.width * 4) && w->frame_key_qpc) {
+    w->latency_ms = (double)(qpc() - w->frame_key_qpc) * g_qpc_ms;
+    w->frame_key_qpc = 0;
+  }
   ghostty_frame_free(&f);
 }
 
 void paint(Window* w) {
   PAINTSTRUCT ps;
   HDC dc = BeginPaint(w->hwnd, &ps);
-  if (w->swap) {
-    // OpenGL owns the window's pixels (the stats overlay is not drawn in
+  if (w->swap || w->dxgi) {
+    // OpenGL (or the DXGI swap chain) owns the window's pixels (the stats overlay is not drawn in
     // this mode yet; the stats pipe still has the numbers).
     EndPaint(w->hwnd, &ps);
     return;

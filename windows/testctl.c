@@ -308,7 +308,7 @@ static void cmd_list(Line* b) {
             w == focused ? "true" : "false");
         put_rect(b, w->hwnd);
         put(b, ",\"grid\":[%u,%u],\"present\":\"%s\",\"title\":", sz.columns, sz.rows,
-            w->swap ? "swap" : "copy");
+            w->swap ? "swap" : w->dxgi ? "dxgi" : "copy");
         put_title(b, w->title);
         put(b, "}");
       }

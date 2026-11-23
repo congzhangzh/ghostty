@@ -488,6 +488,7 @@ static Window* new_pane(Frame* f, ghostty_surface_t from,
   }
   SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
   DragAcceptFiles(w->hwnd, TRUE);  // files dropped on it: their paths (drop_files)
+  w->dxgi = present_dxgi_wanted();  // frames through a DXGI flip swap chain (dxgi.c)
 
   ghostty_surface_config_s cfg = from ? ghostty_surface_inherited_config(from, context)
                                       : ghostty_surface_config_new();
@@ -1020,6 +1021,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       pane_gone(f, w);
       free(w->title);
       free(w->ime_preedit);
+      dxgi_pane_gone(w);
       free(w->bgra);
       free(w);
       return 0;
