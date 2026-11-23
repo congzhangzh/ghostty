@@ -251,11 +251,11 @@ int main(int argc, char** argv) {
   if (stats_client_mode(argc, argv, &rc)) return rc;
   if (ctl_client_mode(argc, argv, &rc)) return rc;
   stderr_guard_start();
-  present_mode_resolve();  // GHOSTTY_PRESENT=interop: kept, or swap (dxgi.c)
   g_main_tid = GetCurrentThreadId();
   LARGE_INTEGER freq;
   QueryPerformanceFrequency(&freq);
   g_qpc_ms = 1000.0 / (double)freq.QuadPart;
+  present_mode_resolve();  // the default (dxgi/interop), or GHOSTTY_PRESENT's (dxgi.c)
 
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   g_debug_keys = getenv("GHOSTTY_DEBUG_KEYS") != NULL;

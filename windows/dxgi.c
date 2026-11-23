@@ -123,7 +123,18 @@ static bool interop_forced(void) {
 
 void present_mode_resolve(void) {
   const char* v = getenv("GHOSTTY_PRESENT");
-  if (!v || strcmp(v, "interop") != 0) return;
+  if (!v || !*v) {
+    // The default (the owner, 2026-11-23: "agree, 1 and 2"): the DXGI flip
+    // path, with interop when GL offers it; any failure falls back to GDI
+    // (said once). GHOSTTY_PRESENT=readback is the way back to GDI.
+    uint64_t t0 = qpc();
+    probe_gl();
+    _putenv(g_gl.interop ? "GHOSTTY_PRESENT=interop" : "GHOSTTY_PRESENT=dxgi");
+    fprintf(stderr, "ghostty: present: default %s (probe %.1f ms%s%s)\n", g_gl.interop ? "interop" : "dxgi",
+            (double)(qpc() - t0) * g_qpc_ms, g_gl.why ? ": " : "", g_gl.why ? g_gl.why : "");
+    v = getenv("GHOSTTY_PRESENT");
+  }
+  if (strcmp(v, "interop") != 0) return;
   probe_gl();
   if (interop_forced()) {
     fprintf(stderr, "ghostty: present: interop forced (GHOSTTY_INTEROP_FORCE=1)%s\n",
