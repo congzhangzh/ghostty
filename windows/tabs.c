@@ -971,6 +971,14 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!(lp & (1 << 30))) scheme_cycle();  // not on auto-repeat
         return 0;  // its release is kept back too (input.c's pressed)
       }
+      // Ctrl+Shift+? : the cheat sheet (sheet.c). The key by its place,
+      // the slash key's scan code (not the keypad's /, an extended one),
+      // so it is the same key on any layout.
+      if (((lp >> 16) & 0xff) == 0x35 && !(lp & (1 << 24)) && (GetKeyState(VK_CONTROL) & 0x8000) &&
+          (GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
+        if (!(lp & (1 << 30))) sheet_toggle(w);
+        return 0;
+      }
       handle_key(w, msg, wp, lp);
       return 0;
     case WM_KEYUP:

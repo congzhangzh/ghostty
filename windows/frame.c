@@ -492,8 +492,8 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           new_tab(f, cur ? cur->surface : NULL, GHOSTTY_SURFACE_CONTEXT_TAB);
           break;
         }
-        case HIT_HELP:  // the overview, for the pane in front
-          if (f->active >= 0) palette_toggle(f->tabs[f->active]);
+        case HIT_HELP:  // the cheat sheet, over the pane in front
+          if (f->active >= 0) sheet_toggle(f->tabs[f->active]);
           break;
         case HIT_EXITFS:  // the reveal bar's: back to the window
           f->reveal_painting = false;

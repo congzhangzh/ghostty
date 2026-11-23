@@ -3,11 +3,11 @@
 // ---------------------------------------------------------------------------
 // The command palette (toggle_command_palette), as the macOS app's
 // (macos/Sources/Features/Command Palette): a search box over a list of
-// what Ghostty can do, each command with its key on the right (the owner:
-// "ctrl shift + ? to show keyboard overview"), and the open terminals to
-// jump to. Enter runs the selected one on the pane it was opened from,
-// Esc or a click elsewhere closes it. Ctrl+Shift+P (upstream's) and, on
-// Windows, Ctrl+Shift+/ (Config.zig) open it.
+// what Ghostty can do, each command with its key on the right, and the
+// open terminals to jump to. Enter runs the selected one on the pane it
+// was opened from, Esc or a click elsewhere closes it. Ctrl+Shift+P
+// (upstream's) opens it; the keys at a glance are the cheat sheet's
+// (sheet.c: the "?" button, Ctrl+Shift+?).
 //
 // The commands are the config's command-palette-entry list, minus those
 // this host does not do yet (as macOS leaves out its own unsupported ones).

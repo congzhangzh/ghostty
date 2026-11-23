@@ -341,6 +341,7 @@ int scheme_mode(void);
 void scheme_cycle(void);
 void quick_toggle(void);
 void palette_toggle(Window* w);
+void sheet_toggle(Window* w);  // the cheat sheet (sheet.c); NULL closes it
 bool help_rect(Frame* f, RECT* r);
 bool exitfs_rect(Frame* f, RECT* r);
 void draw_bar(Frame* f, HDC dc, int width, int b);
