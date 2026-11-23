@@ -150,6 +150,17 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
     case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM:
       return w && toggle_split_zoom(w);
 
+    case GHOSTTY_ACTION_RELOAD_CONFIG:
+      config_reload(target.tag == GHOSTTY_TARGET_SURFACE && w ? w->surface : NULL,
+                    action.action.reload_config.soft);
+      return true;
+    case GHOSTTY_ACTION_OPEN_CONFIG:
+      config_open();
+      return true;
+    case GHOSTTY_ACTION_CONFIG_CHANGE:
+      if (target.tag == GHOSTTY_TARGET_APP) config_changed(action.action.config_change.config);
+      return true;
+
     case GHOSTTY_ACTION_NEW_TAB:
       if (!f) f = front_frame();
       if (!f) return new_window(NULL);

@@ -71,6 +71,22 @@ static bool buildinfo_mode(int argc, char** argv) {
 // ---------------------------------------------------------------------------
 // Config the host reads
 
+// The config as Ghostty loads it: the default files, the command line, the
+// files they include; its problems on stderr.
+static ghostty_config_t config_load(void) {
+  ghostty_config_t c = ghostty_config_new();
+  if (!c) return NULL;
+  ghostty_config_load_default_files(c);
+  ghostty_config_load_cli_args(c);
+  ghostty_config_load_recursive_files(c);
+  ghostty_config_finalize(c);
+  for (uint32_t i = 0; i < ghostty_config_diagnostics_count(c); i++) {
+    ghostty_diagnostic_s d = ghostty_config_get_diagnostic(c, i);
+    fprintf(stderr, "ghostty: config: %s\n", d.message);
+  }
+  return c;
+}
+
 // A config value that is a string (enums come back as their name), or NULL.
 static const char* config_string(const char* key) {
   const char* v = NULL;
@@ -94,6 +110,101 @@ static void read_host_config(void) {
   g_new_tab_at_end = v && strcmp(v, "end") == 0;
   g_bg = config_color("background", RGB(0x28, 0x2c, 0x34));
   g_fg = config_color("foreground", RGB(0xff, 0xff, 0xff));
+}
+
+// Reload the config (Ctrl+Shift+, or the window menu): read the files
+// again and hand the result to the app (every surface) or one surface; a
+// soft reload hands the current one again. The core keeps a copy: this one
+// is the host's to free. The settled config comes back in CONFIG_CHANGE.
+//
+// Never g_config itself: the core answers with CONFIG_CHANGE from inside
+// the update, and config_changed replaces (frees) g_config there, while the
+// update still reads the one it was given. A soft reload passes a clone.
+void config_reload(ghostty_surface_t surface, bool soft) {
+  ghostty_config_t c = soft ? ghostty_config_clone(g_config) : config_load();
+  if (!c) return;
+  if (surface)
+    ghostty_surface_update_config(surface, c);
+  else
+    ghostty_app_update_config(g_app, c);
+  ghostty_config_free(c);
+}
+
+// The app's config changed (a reload, or a light/dark theme following the
+// system): the host's copy and what it reads from it (the tab bar's and
+// the title bar's colors) follow.
+void config_changed(ghostty_config_t config) {
+  ghostty_config_t copy = ghostty_config_clone(config);
+  if (!copy) return;
+  ghostty_config_t old = g_config;
+  g_config = copy;
+  ghostty_config_free(old);
+  read_host_config();
+  for (Frame* f = g_frames; f; f = f->next) {
+    layout(f);  // the title bar's colors (titlebar_update) and the bar
+    InvalidateRect(f->hwnd, NULL, FALSE);
+  }
+}
+
+// Open the config file (Ctrl+, or the window menu) in the editor Windows
+// has for it, else Notepad; made first, with a hint, if it is missing.
+void config_open(void) {
+  ghostty_string_s s = ghostty_config_open_path();
+  if (!s.ptr || !s.len) {
+    ghostty_string_free(s);
+    return;
+  }
+  WCHAR* path = utf8_to_utf16(s.ptr, (int)s.len);
+  ghostty_string_free(s);
+  if (!path) return;
+  if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+    WCHAR dir[MAX_PATH];
+    wcsncpy(dir, path, MAX_PATH - 1);
+    dir[MAX_PATH - 1] = 0;
+    for (WCHAR* p = dir + 3; *p; p++)  // each parent folder
+      if (*p == L'\\' || *p == L'/') {
+        WCHAR c = *p;
+        *p = 0;
+        CreateDirectoryW(dir, NULL);
+        *p = c;
+      }
+    FILE* f = _wfopen(path, L"wb");
+    if (f) {
+      fputs("# Ghostty's config: one setting per line. For example:\n"
+            "# theme = light:Builtin Light,dark:Builtin Dark\n"
+            "# font-size = 12\n",
+            f);
+      fclose(f);
+    }
+  }
+  if ((INT_PTR)ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL) <= 32)
+    ShellExecuteW(NULL, L"open", L"notepad.exe", path, NULL, SW_SHOWNORMAL);
+  free(path);
+}
+
+// Windows' app mode, light or dark (Settings > Personalization > Colors).
+ghostty_color_scheme_e color_scheme_now(void) {
+  DWORD light = 1, n = sizeof(light);
+  if (RegGetValueW(HKEY_CURRENT_USER,
+                   L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                   L"AppsUseLightTheme", RRF_RT_REG_DWORD, NULL, &light, &n) != ERROR_SUCCESS)
+    light = 1;  // Windows' own default
+  return light ? GHOSTTY_COLOR_SCHEME_LIGHT : GHOSTTY_COLOR_SCHEME_DARK;
+}
+
+// Tell Ghostty the system's scheme, so light:/dark: themes follow it: at
+// start and when Windows says it changed (WM_SETTINGCHANGE
+// "ImmersiveColorSet").
+void color_scheme_apply(void) {
+  ghostty_color_scheme_e e = color_scheme_now();
+  ghostty_app_set_color_scheme(g_app, e);
+  for (Frame* f = g_frames; f; f = f->next)
+    for (int i = 0; i < f->ntabs; i++) {
+      Window* panes[64];
+      int n = tab_panes(f->tabs[i]->tab, panes, 64);
+      for (int k = 0; k < n && k < 64; k++)
+        ghostty_surface_set_color_scheme(panes[k]->surface, e);
+    }
 }
 
 static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -140,15 +251,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  g_config = ghostty_config_new();
-  ghostty_config_load_default_files(g_config);
-  ghostty_config_load_cli_args(g_config);
-  ghostty_config_load_recursive_files(g_config);
-  ghostty_config_finalize(g_config);
-  for (uint32_t i = 0; i < ghostty_config_diagnostics_count(g_config); i++) {
-    ghostty_diagnostic_s d = ghostty_config_get_diagnostic(g_config, i);
-    fprintf(stderr, "ghostty: config: %s\n", d.message);
-  }
+  g_config = config_load();
   read_host_config();
   titlebar_choose();
 
@@ -196,6 +299,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  ghostty_app_set_color_scheme(g_app, color_scheme_now());
   start_reports();
   stats_start();
   testctl_start();  // only with GHOSTTY_TEST_CONTROL=1

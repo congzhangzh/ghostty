@@ -501,6 +501,7 @@ static Window* new_pane(Frame* f, ghostty_surface_t from,
   }
   w->node->pane = w;
   ghostty_surface_set_content_scale(w->surface, w->scale, w->scale);
+  ghostty_surface_set_color_scheme(w->surface, color_scheme_now());
   return w;
 }
 

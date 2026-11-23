@@ -37,6 +37,8 @@ bool slogan_shown(void) {
 // keeps the low four bits for itself).
 #define IDM_ABOUT 0x1010
 #define IDM_WHATSNEW 0x1020
+#define IDM_OPEN_CONFIG 0x1030
+#define IDM_RELOAD_CONFIG 0x1040
 
 void about_menu_add(HWND hwnd) {
   HMENU m = GetSystemMenu(hwnd, FALSE);
@@ -44,6 +46,9 @@ void about_menu_add(HWND hwnd) {
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
   AppendMenuW(m, MF_STRING, IDM_ABOUT, L"About Ghostty for Windows…");
   AppendMenuW(m, MF_STRING, IDM_WHATSNEW, L"What's new…");
+  AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+  AppendMenuW(m, MF_STRING, IDM_OPEN_CONFIG, L"Open config…");
+  AppendMenuW(m, MF_STRING, IDM_RELOAD_CONFIG, L"Reload config");
 }
 
 // Microsoft's ConPTY is used when its files are beside ghostty.exe (and
@@ -129,6 +134,8 @@ bool about_command(HWND hwnd, WPARAM wp) {
   switch (wp & 0xFFF0) {
     case IDM_ABOUT: show_about(hwnd); return true;
     case IDM_WHATSNEW: show_whatsnew(hwnd); return true;
+    case IDM_OPEN_CONFIG: config_open(); return true;
+    case IDM_RELOAD_CONFIG: config_reload(NULL, false); return true;
   }
   return false;
 }
