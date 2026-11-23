@@ -95,6 +95,8 @@ const DxInterop = if (Device.api == .wgl) struct {
     rb: [2]gl.Renderbuffer = undefined,
     fbo: [2]gl.Framebuffer = undefined,
     ready: bool = false,
+    /// How many of rb/fbo/hobj exist (a failed registration frees only those).
+    made: u2 = 0,
     next: u1 = 0,
 
     const Fns = struct {
@@ -131,35 +133,75 @@ pub fn setSharedTextures(
 fn dxRelease(self: *OpenGL) void {
     if (comptime Device.api != .wgl) return;
     const dx = &self.dx;
-    if (dx.ready) {
-        for (0..2) |i| {
-            if (dx.hobj[i]) |o| _ = dx.fns.?.unregister(dx.hdev, o);
-            dx.fbo[i].destroy();
-            dx.rb[i].destroy();
-            dx.hobj[i] = null;
-        }
+    for (0..dx.made) |i| {
+        if (dx.hobj[i]) |o| _ = dx.fns.?.unregister(dx.hdev, o);
+        dx.fbo[i].destroy();
+        dx.rb[i].destroy();
+        dx.hobj[i] = null;
     }
+    dx.made = 0;
     if (dx.hdev) |h| _ = dx.fns.?.close(h);
     dx.hdev = null;
     dx.ready = false;
+}
+
+/// Slot i: a renderbuffer for texture `tex`, registered, behind a framebuffer.
+fn dxMake(self: *OpenGL, i: usize, tex: ?*anyopaque) bool {
+    if (comptime Device.api != .wgl) return false;
+    const dx = &self.dx;
+    const f = dx.fns.?;
+    const rb = gl.Renderbuffer.create() catch return false;
+    const fbo = gl.Framebuffer.create() catch {
+        rb.destroy();
+        return false;
+    };
+    // GL_RENDERBUFFER, WGL_ACCESS_WRITE_DISCARD_NV
+    const obj = f.register(dx.hdev, tex, rb.id, 0x8D41, 0x0002) orelse {
+        log.warn("present: interop: wglDXRegisterObjectNV failed, reading frames back", .{});
+        fbo.destroy();
+        rb.destroy();
+        return false;
+    };
+    dx.rb[i] = rb;
+    dx.fbo[i] = fbo;
+    dx.hobj[i] = obj;
+    dx.made = @intCast(i + 1);
+    var objs = [1]?*anyopaque{obj};
+    if (f.lock(dx.hdev, 1, &objs) == 0) return false;
+    defer _ = f.unlock(dx.hdev, 1, &objs);
+    const b = fbo.bind(.draw) catch return false;
+    defer b.unbind();
+    b.renderbuffer(.color0, rb) catch return false;
+    return true;
 }
 
 fn dxRegister(self: *OpenGL, device: *anyopaque, tex: [2]?*anyopaque) bool {
     if (comptime Device.api != .wgl) return false;
     const dx = &self.dx;
     if (dx.fns == null) {
+        // Into locals first, then all at once: a literal assigned to the
+        // optional is built in place, so an early return out of it left
+        // dx.fns non-null with null functions, and the next registration
+        // called address 0 (a crash Wine found, forced, at a resize).
         const p = gl.wgl.getProcAddress;
-        dx.fns = .{
-            .open = @ptrCast(p("wglDXOpenDeviceNV") orelse {
-                log.warn("present: interop: no WGL_NV_DX_interop2 in this driver, reading frames back", .{});
-                return false;
-            }),
-            .close = @ptrCast(p("wglDXCloseDeviceNV") orelse return false),
-            .register = @ptrCast(p("wglDXRegisterObjectNV") orelse return false),
-            .unregister = @ptrCast(p("wglDXUnregisterObjectNV") orelse return false),
-            .lock = @ptrCast(p("wglDXLockObjectsNV") orelse return false),
-            .unlock = @ptrCast(p("wglDXUnlockObjectsNV") orelse return false),
+        const open = p("wglDXOpenDeviceNV") orelse {
+            log.warn("present: interop: no WGL_NV_DX_interop2 in this driver, reading frames back", .{});
+            return false;
         };
+        const close = p("wglDXCloseDeviceNV") orelse return false;
+        const register = p("wglDXRegisterObjectNV") orelse return false;
+        const unregister = p("wglDXUnregisterObjectNV") orelse return false;
+        const lock = p("wglDXLockObjectsNV") orelse return false;
+        const unlock = p("wglDXUnlockObjectsNV") orelse return false;
+        const fns: DxInterop.Fns = .{
+            .open = @ptrCast(open),
+            .close = @ptrCast(close),
+            .register = @ptrCast(register),
+            .unregister = @ptrCast(unregister),
+            .lock = @ptrCast(lock),
+            .unlock = @ptrCast(unlock),
+        };
+        dx.fns = fns;
     }
     const f = dx.fns.?;
     dx.hdev = f.open(device) orelse {
@@ -167,21 +209,10 @@ fn dxRegister(self: *OpenGL, device: *anyopaque, tex: [2]?*anyopaque) bool {
         return false;
     };
     for (0..2) |i| {
-        dx.rb[i] = gl.Renderbuffer.create() catch return false;
-        dx.fbo[i] = gl.Framebuffer.create() catch return false;
-        // GL_RENDERBUFFER, WGL_ACCESS_WRITE_DISCARD_NV
-        dx.hobj[i] = f.register(dx.hdev, tex[i], dx.rb[i].id, 0x8D41, 0x0002) orelse {
-            log.warn("present: interop: wglDXRegisterObjectNV failed, reading frames back", .{});
-            dx.ready = true; // so dxRelease frees what was made
-            self.dxRelease();
+        if (!self.dxMake(i, tex[i])) {
+            self.dxRelease(); // only what was made (dx.made), and the device
             return false;
-        };
-        var obj = [1]?*anyopaque{dx.hobj[i]};
-        if (f.lock(dx.hdev, 1, &obj) == 0) return false;
-        defer _ = f.unlock(dx.hdev, 1, &obj);
-        const b = dx.fbo[i].bind(.draw) catch return false;
-        defer b.unbind();
-        b.renderbuffer(.color0, dx.rb[i]) catch return false;
+        }
     }
     dx.ready = true;
     dx.next = 0;
