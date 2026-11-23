@@ -2949,6 +2949,12 @@ keybind: Keybinds = .{},
 ///
 ///   * `bash`, `elvish`, `fish`, `nushell`, `zsh` - Use this specific shell injection scheme.
 ///
+///   * `cmd`, `powershell` - Windows: cmd.exe (through its `PROMPT`
+///     variable) and pwsh / Windows PowerShell (`powershell/ghostty.ps1`,
+///     run after your profile; only when the shell has no arguments but
+///     `-NoLogo` / `-NoProfile`). Both report the working directory (OSC 7)
+///     and mark the prompt (OSC 133).
+///
 /// The default value is `detect`.
 @"shell-integration": ShellIntegration = .detect,
 
@@ -9004,6 +9010,8 @@ pub const ShellIntegration = enum {
     fish,
     nushell,
     zsh,
+    cmd,
+    powershell,
 };
 
 /// Shell integration features

@@ -1539,11 +1539,6 @@ pub const StreamHandler = struct {
             return;
         }
 
-        if (builtin.target.os.tag == .windows) {
-            log.warn("reportPwd unimplemented on windows", .{});
-            return;
-        }
-
         // Attempt to parse this file-style URI using options appropriate
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
         // unencoded path).
@@ -1562,9 +1557,12 @@ pub const StreamHandler = struct {
             return;
         }
 
+        const windows = comptime builtin.target.os.tag == .windows;
         var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
         const host = osc7Host(uri, &host_buffer) catch |err| switch (err) {
-            error.UriMissingHost => {
+            // file:///C:/path is how Windows writes a local file URL.
+            error.UriMissingHost => missing: {
+                if (windows) break :missing "";
                 log.warn("OSC 7 uri must contain a hostname: {}", .{err});
                 return;
             },
@@ -1577,7 +1575,12 @@ pub const StreamHandler = struct {
         // OSC 7 is a little sketchy because anyone can send any value from
         // any host (such an SSH session). The best practice terminals follow
         // is to valid the hostname to be local.
-        const host_valid = internal_os.hostname.isLocal(host) catch |err| switch (err) {
+        // On Windows, \\wsl.localhost\<distro> (or \\wsl$) is this machine's
+        // WSL distros' files, and an empty host is local.
+        const wsl_host = windows and (std.ascii.eqlIgnoreCase(host, "wsl.localhost") or
+            std.ascii.eqlIgnoreCase(host, "wsl$"));
+        const host_valid = (windows and (wsl_host or host.len == 0)) or
+            internal_os.hostname.isLocal(host) catch |err| switch (err) {
             error.PermissionDenied,
             error.Unexpected,
             => {
@@ -1596,7 +1599,18 @@ pub const StreamHandler = struct {
         var stack_alloc_buf: [1024]u8 = undefined;
         var stack_alloc: std.heap.BufferFirstAllocator = .init(&stack_alloc_buf, arena_alloc.allocator());
         defer arena_alloc.deinit();
-        const path = try uri.path.toRawMaybeAlloc(stack_alloc.allocator());
+        const raw_path = try uri.path.toRawMaybeAlloc(stack_alloc.allocator());
+
+        // On Windows the URL's path becomes one a new terminal can start in
+        // (C:\dir, \\server\share\dir); a POSIX path (a shell inside WSL
+        // reporting /home/me) is not one, and is left out.
+        const path = if (windows)
+            try osc7WindowsPath(stack_alloc.allocator(), raw_path, if (wsl_host) "wsl.localhost" else null) orelse {
+                log.warn("OSC 7 path is not a Windows path, ignoring: {s}", .{raw_path});
+                return;
+            }
+        else
+            raw_path;
 
         log.debug("terminal pwd: {s}", .{path});
         try self.terminal.setPwd(path);
@@ -1964,6 +1978,70 @@ pub const StreamHandler = struct {
 /// `internal_os.hostname.isLocal`), and local hostnames are often not
 /// valid RFC 1123 hostnames: macOS allows names like "Foo's MacBook Pro",
 /// some systems use underscores, and some report a MAC address.
+/// The Windows path an OSC 7 URL's path names, or null when it names none.
+/// "/C:/dir" and "/C:\dir" (file:// and kitty-shell-cwd:// forms) become
+/// "C:\dir"; "C:" becomes "C:\"; a UNC path ("//server/share",
+/// "/\\server\share") stays one. With `unc_host` (a WSL host), the path
+/// "/Ubuntu/home/me" is "\\<unc_host>\Ubuntu\home\me". Anything else (a
+/// POSIX path) is null.
+fn osc7WindowsPath(
+    alloc: Allocator,
+    path: []const u8,
+    unc_host: ?[]const u8,
+) Allocator.Error!?[]const u8 {
+    const sep = struct {
+        fn is(c: u8) bool {
+            return c == '/' or c == '\\';
+        }
+    };
+    var out: std.ArrayList(u8) = .empty;
+    if (unc_host) |h| {
+        if (path.len < 2 or !sep.is(path[0])) return null;
+        try out.appendSlice(alloc, "\\\\");
+        try out.appendSlice(alloc, h);
+        for (path) |c| try out.append(alloc, if (c == '/') '\\' else c);
+        return out.items;
+    }
+    var p = path;
+    // One leading separator before a drive or a UNC path is the URL's.
+    if (p.len >= 3 and sep.is(p[0]) and std.ascii.isAlphabetic(p[1]) and p[2] == ':') p = p[1..];
+    if (p.len >= 3 and sep.is(p[0]) and sep.is(p[1]) and sep.is(p[2])) p = p[1..];
+    const drive = p.len >= 2 and std.ascii.isAlphabetic(p[0]) and p[1] == ':' and
+        (p.len == 2 or sep.is(p[2]));
+    const unc = p.len >= 3 and sep.is(p[0]) and sep.is(p[1]) and !sep.is(p[2]);
+    if (!drive and !unc) return null;
+    for (p) |c| try out.append(alloc, if (c == '/') '\\' else c);
+    if (drive and p.len == 2) try out.append(alloc, '\\');
+    return out.items;
+}
+
+test osc7WindowsPath {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const Case = struct { in: []const u8, unc: ?[]const u8 = null, want: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .in = "/C:/Users/me", .want = "C:\\Users\\me" },
+        .{ .in = "/C:\\Program Files\\x", .want = "C:\\Program Files\\x" },
+        .{ .in = "/d:", .want = "d:\\" },
+        .{ .in = "C:\\dir", .want = "C:\\dir" },
+        .{ .in = "//server/share/dir", .want = "\\\\server\\share\\dir" },
+        .{ .in = "/\\\\server\\share", .want = "\\\\server\\share" },
+        .{ .in = "/Ubuntu/home/me", .unc = "wsl.localhost", .want = "\\\\wsl.localhost\\Ubuntu\\home\\me" },
+        .{ .in = "/home/me", .want = null },
+        .{ .in = "/", .want = null },
+        .{ .in = "/C:dir", .want = null },
+    };
+    for (cases) |c| {
+        const got = try osc7WindowsPath(alloc, c.in, c.unc);
+        if (c.want) |want| {
+            try testing.expect(got != null);
+            try testing.expectEqualStrings(want, got.?);
+        } else try testing.expect(got == null);
+    }
+}
+
 fn osc7Host(
     uri: std.Uri,
     buffer: *[std.Io.net.HostName.max_len]u8,

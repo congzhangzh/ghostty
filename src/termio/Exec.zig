@@ -802,6 +802,8 @@ const Subprocess = struct {
                 .fish => .fish,
                 .nushell => .nushell,
                 .zsh => .zsh,
+                .cmd => .cmd,
+                .powershell => .powershell,
             };
 
             const dir = cfg.resources_dir orelse {

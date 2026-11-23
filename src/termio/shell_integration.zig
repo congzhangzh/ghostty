@@ -17,6 +17,10 @@ pub const Shell = enum {
     fish,
     nushell,
     zsh,
+    /// Windows' cmd.exe: through its PROMPT variable, no file.
+    cmd,
+    /// pwsh 7 and Windows PowerShell 5.1: powershell/ghostty.ps1.
+    powershell,
 };
 
 /// The result of setting up a shell integration.
@@ -77,12 +81,62 @@ pub fn setup(
             if (!try setupXdgDataDirs(alloc_arena, resource_dir, env)) return null;
             break :xdg try command.clone(alloc_arena);
         },
+
+        .cmd => try setupCmd(alloc_arena, command, env),
+
+        .powershell => try setupPowerShell(alloc_arena, command, resource_dir),
     } orelse return null;
 
     return .{
         .shell = shell,
         .command = new_command,
     };
+}
+
+test "cmd: the prompt between marks, with the folder" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    _ = (try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env)).?;
+    try testing.expectEqualStrings(
+        "$E]133;A$E\\$E]7;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
+        env.get("PROMPT").?,
+    );
+    // Once only, and around the user's own prompt.
+    _ = (try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env)).?;
+    try testing.expect(std.mem.count(u8, env.get("PROMPT").?, "133;A") == 1);
+    try env.put("PROMPT", "[$T] $P$G");
+    _ = (try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env)).?;
+    try testing.expect(std.mem.indexOf(u8, env.get("PROMPT").?, "$E\\[$T] $P$G$E]133;B") != null);
+}
+
+test "powershell: -NoExit -EncodedCommand, only for a plain shell" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(.powershell);
+    defer res.deinit();
+    const cmd = (try setupPowerShell(alloc, .{ .shell = "pwsh -NoLogo" }, res.path)).?;
+    const argv = cmd.direct;
+    try testing.expectEqual(@as(usize, 5), argv.len);
+    try testing.expectEqualStrings("pwsh", argv[0]);
+    try testing.expectEqualStrings("-NoLogo", argv[1]);
+    try testing.expectEqualStrings("-NoExit", argv[2]);
+    try testing.expectEqualStrings("-EncodedCommand", argv[3]);
+    const dec = std.base64.standard.Decoder;
+    const raw = try alloc.alloc(u8, try dec.calcSizeForSlice(argv[4]));
+    try dec.decode(raw, argv[4]);
+    const units = try alloc.alloc(u16, raw.len / 2);
+    for (units, 0..) |*u, i| u.* = std.mem.readInt(u16, raw[2 * i ..][0..2], .little);
+    const text = try std.unicode.utf16LeToUtf8Alloc(alloc, units);
+    try testing.expect(std.mem.startsWith(u8, text, ". ([scriptblock]::Create([IO.File]::ReadAllText('"));
+    try testing.expect(std.mem.endsWith(u8, text, "ghostty.ps1')))"));
+    // The user's own arguments: left alone.
+    try testing.expect(try setupPowerShell(alloc, .{ .shell = "pwsh -Command Get-Date" }, res.path) == null);
 }
 
 test "force shell" {
@@ -156,6 +210,14 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
             }
         }
         return .bash;
+    }
+
+    // Windows: cmd.exe, pwsh.exe, powershell.exe, any case.
+    if (comptime builtin.target.os.tag == .windows) {
+        const name = if (std.ascii.endsWithIgnoreCase(exe, ".exe")) exe[0 .. exe.len - 4] else exe;
+        if (std.ascii.eqlIgnoreCase(name, "cmd")) return .cmd;
+        if (std.ascii.eqlIgnoreCase(name, "pwsh") or
+            std.ascii.eqlIgnoreCase(name, "powershell")) return .powershell;
     }
 
     if (std.mem.eql(u8, "elvish", exe)) return .elvish;
@@ -623,6 +685,74 @@ test "bash: missing resources" {
 /// It is also saved in the `GHOSTTY_SHELL_INTEGRATION_XDG_DIR` variable
 /// so that the shell can refer to it and safely remove this directory
 /// from `XDG_DATA_DIRS` when integration is complete.
+/// cmd.exe: its prompt (the PROMPT variable, or cmd's default $P$G) between
+/// OSC 133 marks, with OSC 7 for the folder ($P, as is: kitty-shell-cwd
+/// takes a raw path). $E is ESC in a cmd prompt. The command is unchanged.
+fn setupCmd(
+    alloc: Allocator,
+    command: config.Command,
+    env: *EnvMap,
+) !?config.Command {
+    const user = env.get("PROMPT") orelse "$P$G";
+    if (std.mem.indexOf(u8, user, "]133;") != null) return try command.clone(alloc); // already
+    const prompt = try std.fmt.allocPrint(
+        alloc,
+        "$E]133;A$E\\$E]7;kitty-shell-cwd://localhost/$P$E\\{s}$E]133;B$E\\",
+        .{user},
+    );
+    try env.put("PROMPT", prompt);
+    return try command.clone(alloc);
+}
+
+/// pwsh / powershell: powershell/ghostty.ps1, run after the profile with
+/// `-NoExit -EncodedCommand`: the script's text as a script block, so the
+/// execution policy (Restricted by default on Windows PowerShell 5.1) does
+/// not apply, and base64 leaves nothing to quote. Only when the command has
+/// no arguments but -NoLogo / -NoProfile: anything else is the user's.
+fn setupPowerShell(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+) !?config.Command {
+    const script = try std.fs.path.join(alloc, &.{ resource_dir, "shell-integration", "powershell", "ghostty.ps1" });
+    std.Io.Dir.cwd().access(global.io(), script, .{}) catch {
+        log.warn("powershell shell integration not found: {s}", .{script});
+        return null;
+    };
+
+    var args: std.ArrayList([:0]const u8) = .empty;
+    var iter = try command.argIterator(alloc);
+    defer iter.deinit();
+    try args.append(alloc, try alloc.dupeSentinel(u8, iter.next() orelse return null, 0));
+    while (iter.next()) |arg| {
+        if (!std.ascii.eqlIgnoreCase(arg, "-NoLogo") and !std.ascii.eqlIgnoreCase(arg, "-nol") and
+            !std.ascii.eqlIgnoreCase(arg, "-NoProfile") and !std.ascii.eqlIgnoreCase(arg, "-nop"))
+            return null;
+        try args.append(alloc, try alloc.dupeSentinel(u8, arg, 0));
+    }
+
+    // . ([scriptblock]::Create([IO.File]::ReadAllText('<script>'))), a
+    // single quote in the path doubled; -EncodedCommand is its UTF-16LE in
+    // base64.
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(alloc, ". ([scriptblock]::Create([IO.File]::ReadAllText('");
+    for (script) |c| {
+        if (c == '\'') try text.append(alloc, '\'');
+        try text.append(alloc, c);
+    }
+    try text.appendSlice(alloc, "')))");
+    const utf16 = try std.unicode.utf8ToUtf16LeAlloc(alloc, text.items);
+    const bytes = std.mem.sliceAsBytes(utf16);
+    const enc = std.base64.standard.Encoder;
+    const b64 = try alloc.allocSentinel(u8, enc.calcSize(bytes.len), 0);
+    _ = enc.encode(b64, bytes);
+
+    try args.append(alloc, "-NoExit");
+    try args.append(alloc, "-EncodedCommand");
+    try args.append(alloc, b64);
+    return .{ .direct = try args.toOwnedSlice(alloc) };
+}
+
 fn setupXdgDataDirs(
     alloc: Allocator,
     resource_dir: []const u8,
@@ -1039,6 +1169,10 @@ const TmpResourcesDir = struct {
         switch (shell) {
             .bash => try tmp_dir.dir.writeFile(std.testing.io, .{
                 .sub_path = "shell-integration/bash/ghostty.bash",
+                .data = "",
+            }),
+            .powershell => try tmp_dir.dir.writeFile(std.testing.io, .{
+                .sub_path = "shell-integration/powershell/ghostty.ps1",
                 .data = "",
             }),
             else => {},
