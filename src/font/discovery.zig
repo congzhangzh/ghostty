@@ -1018,6 +1018,13 @@ pub const Windows = struct {
         };
     }
 
+    /// A codepoint fallback. For Chinese, Japanese and Korean characters the
+    /// fonts of that script come first (preferredCjkFiles): the directory
+    /// walk alone takes the first file in name order that has the
+    /// character, which on a stock Windows is a Korean font (Gulim,
+    /// Malgun Gothic) for 中 as well. Fonts named in the config
+    /// (font-family, font-codepoint-map) are in the collection before any
+    /// fallback, so they still win.
     pub fn discoverFallback(
         self: *const Windows,
         alloc: Allocator,
@@ -1025,7 +1032,52 @@ pub const Windows = struct {
         desc: Descriptor,
     ) !DiscoverIterator {
         _ = collection;
-        return self.discover(alloc, desc);
+        var it = try self.discover(alloc, desc);
+        if (desc.codepoint != 0) {
+            it.preferred = preferredCjkFiles(
+                if (comptime builtin.target.os.tag == .windows) GetUserDefaultUILanguage() else 0,
+                desc.codepoint,
+            );
+        }
+        return it;
+    }
+
+    extern "kernel32" fn GetUserDefaultUILanguage() callconv(.winapi) u16;
+
+    const cjk_hans = [_][]const u8{ "msyh.ttc", "Deng.ttf", "simsun.ttc" };
+    const cjk_hant = [_][]const u8{ "msjh.ttc", "msyh.ttc", "simsun.ttc" };
+    const cjk_ja = [_][]const u8{ "YuGothR.ttc", "meiryo.ttc", "msgothic.ttc" };
+    const cjk_ko = [_][]const u8{ "malgun.ttf", "gulim.ttc" };
+
+    /// The font files (in the Windows font folder) to try first for a
+    /// codepoint: Hangul in Korean fonts, kana in Japanese ones, Han and
+    /// the CJK symbols by the display language (`langid`, a LANGID: zh-TW,
+    /// HK, MO in Traditional Chinese fonts, other Chinese in Simplified,
+    /// ja Japanese, ko Korean, any other language Simplified Chinese).
+    /// Empty for any other codepoint.
+    fn preferredCjkFiles(langid: u16, cp: u32) []const []const u8 {
+        const in = struct {
+            fn range(c: u32, lo: u32, hi: u32) bool {
+                return c >= lo and c <= hi;
+            }
+        }.range;
+        if (in(cp, 0x1100, 0x11FF) or in(cp, 0x3130, 0x318F) or in(cp, 0xA960, 0xA97F) or
+            in(cp, 0xAC00, 0xD7FF)) return &cjk_ko;
+        if (in(cp, 0x3040, 0x30FF) or in(cp, 0x31F0, 0x31FF) or in(cp, 0xFF66, 0xFF9F))
+            return &cjk_ja;
+        const han = in(cp, 0x2E80, 0x2FDF) or in(cp, 0x3000, 0x303F) or in(cp, 0x3100, 0x312F) or
+            in(cp, 0x31A0, 0x31BF) or in(cp, 0x3200, 0x33FF) or in(cp, 0x3400, 0x4DBF) or
+            in(cp, 0x4E00, 0x9FFF) or in(cp, 0xF900, 0xFAFF) or in(cp, 0xFE30, 0xFE4F) or
+            in(cp, 0xFF00, 0xFFEF) or in(cp, 0x20000, 0x3FFFF);
+        if (!han) return &.{};
+        const primary = langid & 0x3ff;
+        const sub = langid >> 10;
+        return switch (primary) {
+            0x04 => if (sub == 0x01 or sub == 0x03 or sub == 0x05) &cjk_hant else &cjk_hans,
+            0x11 => &cjk_ja,
+            0x12 => &cjk_ko,
+            else => &cjk_hans,
+        };
     }
 
     pub const DiscoverIterator = struct {
@@ -1038,6 +1090,10 @@ pub const Windows = struct {
         iter: ?std.Io.Dir.Iterator,
         system_path: ?[:0]const u8,
         user_path: ?[:0]const u8,
+        /// Files in the system font folder tried before the walk (a CJK
+        /// fallback: Windows.preferredCjkFiles), and how many were.
+        preferred: []const []const u8 = &.{},
+        pref_i: usize = 0,
 
         const State = enum { system, user, done };
 
@@ -1049,12 +1105,21 @@ pub const Windows = struct {
         }
 
         pub fn next(self: *DiscoverIterator) !?DeferredFace {
+            // The preferred files first, by name: one open each.
+            while (self.pref_i < self.preferred.len) {
+                const name = self.preferred[self.pref_i];
+                self.pref_i += 1;
+                if (self.system_path == null) self.system_path = self.systemFontsPath();
+                const dir = self.system_path orelse break;
+                if (try self.tryMatchIn(dir, name)) |face| return face;
+            }
+
             while (true) {
                 // Ensure we have a directory iterator for the current state.
                 if (self.iter == null) {
                     switch (self.state) {
                         .system => {
-                            const path = self.systemFontsPath() orelse {
+                            const path = self.system_path orelse self.systemFontsPath() orelse {
                                 self.state = .user;
                                 continue;
                             };
@@ -1148,7 +1213,14 @@ pub const Windows = struct {
                 .user => self.user_path.?,
                 .done => return null,
             };
+            return self.tryMatchIn(dir_path, name);
+        }
 
+        fn tryMatchIn(
+            self: *DiscoverIterator,
+            dir_path: []const u8,
+            name: []const u8,
+        ) !?DeferredFace {
             var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const full_path = std.mem.printSentinel(
                 &path_buf,
@@ -1418,6 +1490,22 @@ test "coretext sorting" {
         const name = try res.name(&buf);
         try testing.expectEqualStrings("SF Pro Bold Italic", name);
     }
+}
+
+test "Windows: CJK fallback files by script and display language" {
+    const testing = std.testing;
+    const en_us: u16 = 0x0409;
+    try testing.expectEqualStrings("msyh.ttc", Windows.preferredCjkFiles(en_us, 0x4E2D)[0]); // 中
+    try testing.expectEqualStrings("msyh.ttc", Windows.preferredCjkFiles(0x0804, 0x4E2D)[0]); // zh-CN
+    try testing.expectEqualStrings("msjh.ttc", Windows.preferredCjkFiles(0x0404, 0x4E2D)[0]); // zh-TW
+    try testing.expectEqualStrings("msjh.ttc", Windows.preferredCjkFiles(0x0C04, 0x4E2D)[0]); // zh-HK
+    try testing.expectEqualStrings("YuGothR.ttc", Windows.preferredCjkFiles(0x0411, 0x65E5)[0]); // ja: 日
+    try testing.expectEqualStrings("YuGothR.ttc", Windows.preferredCjkFiles(0x0804, 0x3042)[0]); // あ
+    try testing.expectEqualStrings("malgun.ttf", Windows.preferredCjkFiles(0x0804, 0xD55C)[0]); // 한
+    try testing.expectEqualStrings("malgun.ttf", Windows.preferredCjkFiles(0x0412, 0x4E2D)[0]); // ko: 中
+    try testing.expectEqualStrings("msyh.ttc", Windows.preferredCjkFiles(en_us, 0x20000)[0]); // ext B
+    try testing.expectEqual(@as(usize, 0), Windows.preferredCjkFiles(en_us, 'A').len);
+    try testing.expectEqual(@as(usize, 0), Windows.preferredCjkFiles(en_us, 0x1F600).len); // 😀
 }
 
 test "windows" {
