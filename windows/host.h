@@ -246,6 +246,8 @@ void stats_ipc_publish(const char* line, size_t len);
 bool stats_client_mode(int argc, char** argv, int* rc);
 WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box);
 void present_stats(Window* w, HDC dc, RECT box, const WCHAR* text);
+// glcheck.c: why the first window failed (OpenGL 4.3 missing?), in a message box.
+void glcheck_explain(void);
 void notify_toast(Window* w, const char* title, const char* body);
 void notify_progress(Window* w, ghostty_action_progress_report_s r);
 void notify_frame_changed(Frame* f);

@@ -196,7 +196,10 @@ int main(int argc, char** argv) {
 
   start_reports();
   stats_start();
-  if (!new_window(NULL)) return 1;
+  if (!new_window(NULL)) {
+    glcheck_explain();  // why, in a message box (glcheck.c)
+    return 1;
+  }
   whatsnew_once(g_frames->hwnd);  // after an upgrade, once
 
   // To prove the reports, 3 seconds after start: GHOSTTY_TEST_HANG=<seconds>

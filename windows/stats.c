@@ -14,7 +14,11 @@
 
 // The OpenGL driver loaded in this process: which GPU really renders (on a
 // laptop with two GPUs the display adapter can be the other one).
+extern const char* ghostty_windows_gl_driver(void);  // pkg/opengl/wgl.zig
 static const char* gl_driver(void) {
+  // Mesa's from the package (wgl.zig's fallback): software, whatever GPU.
+  if (strcmp(ghostty_windows_gl_driver(), "mesa") == 0)
+    return "Mesa software (opengl\\opengl32.dll)";
   static const struct { const WCHAR* dll; const char* name; } known[] = {
       {L"nvoglv64.dll", "NVIDIA (nvoglv64)"},
       {L"atio6axx.dll", "AMD (atio6axx)"},
