@@ -292,6 +292,8 @@ void config_reload(ghostty_surface_t surface, bool soft);
 char* theme_config_file(void);
 int scheme_mode(void);
 void scheme_cycle(void);
+const WCHAR* theme_hint(void);
+bool theme_timer(Frame* f, WPARAM id);
 void theme_menu_add(HMENU sys);
 void theme_menu_update(HMENU sys);
 bool theme_command(HWND hwnd, WPARAM wp);

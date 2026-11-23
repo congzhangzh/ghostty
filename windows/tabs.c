@@ -207,7 +207,14 @@ static void draw_bar(Frame* f, HDC dc, int width, int b) {
 
   // Ghostty's motto in the caption's empty part, dim, only when it fits
   // whole (the tabs come first). GHOSTTY_SLOGAN=false turns it off.
-  if (titlebar_active(f) && slogan_shown()) {
+  // A hint from the Theme menu's key takes its place for a few seconds.
+  const WCHAR* hint = theme_hint();
+  if (hint) {
+    RECT m = {xp + b + px(f, 16), 0, end, b};
+    SetTextColor(dc, g_fg);
+    DrawTextW(dc, hint, -1, &m,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+  } else if (titlebar_active(f) && slogan_shown()) {
     RECT m = {xp + b + px(f, 16), 0, end, b};
     RECT need = {0, 0, 0, 0};
     DrawTextW(dc, kMotto, -1, &need, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
@@ -356,21 +363,21 @@ void pane_focused(Window* w) {
 
 // The window's title (the taskbar's too): the selected tab's title and
 // which build runs, "<title> \u2014 Ghostty <build>". The tabs show the
-// titles alone.
+// titles alone. With Windows' own caption (no tabs in the title bar) a
+// hint from the Theme key goes first, for its few seconds.
 void update_title(Frame* f) {
   static const WCHAR app[] = L"Ghostty " WIDEN(GHOSTTY_BUILD_TAG);
   Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
-  if (!w || !w->title || !*w->title) {
-    SetWindowTextW(f->hwnd, app);
-    return;
-  }
-  size_t n = wcslen(w->title) + wcslen(app) + 4;
+  const WCHAR* title = w && w->title && *w->title ? w->title : NULL;
+  const WCHAR* hint = titlebar_active(f) ? NULL : theme_hint();
+  size_t n = (title ? wcslen(title) : 0) + (hint ? wcslen(hint) : 0) + wcslen(app) + 8;
   WCHAR* t = malloc(n * sizeof(WCHAR));
   if (!t) {
-    SetWindowTextW(f->hwnd, w->title);
+    SetWindowTextW(f->hwnd, title ? title : app);
     return;
   }
-  swprintf(t, n, L"%ls \u2014 %ls", w->title, app);
+  swprintf(t, n, L"%ls%ls%ls%ls%ls", hint ? hint : L"", hint ? L" \u2014 " : L"",
+           title ? title : L"", title ? L" \u2014 " : L"", app);
   SetWindowTextW(f->hwnd, t);
   free(t);
 }

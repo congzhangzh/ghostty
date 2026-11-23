@@ -4,9 +4,12 @@
 // Themes: a list to switch, and Light / Dark / Auto
 //
 // The window menu's "Theme ▸" (the owner: "a list to switch theme, and
-// light dark for quick"): favourites, "More themes…" (a search list with a
-// live preview on that window: Enter keeps, Esc reverts), "Default (from
-// my config)", and Auto / Light / Dark (also Ctrl+Shift+F12, round).
+// light dark for quick"): favourites, each a light/dark pair (written
+// `theme = light:X,dark:Y`, so the quick switch always changes something),
+// "More themes…" (every single theme, a search list with a live preview on
+// that window: Enter keeps, Esc reverts), "Default (from my config)", and
+// Auto / Light / Dark (also Ctrl+Shift+F12, round; on a theme without a
+// pair the title bar says so for a few seconds).
 //
 // His config is never rewritten. A chosen theme goes in
 // %LOCALAPPDATA%\ghostty\theme.ghostty ("theme = <name>"), which the host
@@ -23,11 +26,27 @@
 #define IDM_SCHEME_DARK 0x1090
 #define IDM_THEME_FAV 0x1100  // + 0x10 per favourite
 
-static const char* const kFavourites[] = {
-    "Catppuccin Latte", "Catppuccin Mocha",       "GitHub Light Default",  "GitHub Dark Default",
-    "iTerm2 Solarized Light", "iTerm2 Solarized Dark", "Gruvbox Dark", "TokyoNight",
+// The favourites: one row per family, its light and dark theme (the names
+// as share\ghostty\themes has them).
+static const struct {
+  const WCHAR* label;
+  const char* light;
+  const char* dark;
+} kPairs[] = {
+    {L"Catppuccin (Latte / Mocha)", "Catppuccin Latte", "Catppuccin Mocha"},
+    {L"GitHub (Light / Dark)", "GitHub Light Default", "GitHub Dark Default"},
+    {L"Solarized (Light / Dark)", "iTerm2 Solarized Light", "iTerm2 Solarized Dark"},
+    {L"Gruvbox (Light / Dark)", "Gruvbox Light", "Gruvbox Dark"},
+    {L"Tokyo Night (Day / Night)", "TokyoNight Day", "TokyoNight Night"},
+    {L"Rose Pine (Dawn / Main)", "Rose Pine Dawn", "Rose Pine"},
+    {L"Atom One (Light / Dark)", "Atom One Light", "Atom One Dark"},
+    {L"Builtin (Light / Dark)", "Builtin Light", "Builtin Dark"},
 };
-#define NFAV ((int)(sizeof(kFavourites) / sizeof(kFavourites[0])))
+#define NFAV ((int)(sizeof(kPairs) / sizeof(kPairs[0])))
+
+static void pair_value(int i, char* out, size_t cap) {
+  snprintf(out, cap, "light:%s,dark:%s", kPairs[i].light, kPairs[i].dark);
+}
 
 static int g_scheme_mode = -1;  // 0 auto, 1 light, 2 dark (host.ini)
 static void menus_update(void);
@@ -121,6 +140,54 @@ static bool theme_exists(const char* name) {
   return found;
 }
 
+// A `theme` value's parts, as Ghostty reads it: "X", or
+// "light:X,dark:Y" (either order). light/dark get the names ("" if none);
+// a single theme is both.
+static void theme_parts(const char* value, char* light, char* dark, size_t cap) {
+  light[0] = dark[0] = 0;
+  const char* p = value;
+  bool any = false;
+  while (*p) {
+    size_t n = strcspn(p, ",");
+    char part[256];
+    size_t k = n < sizeof(part) - 1 ? n : sizeof(part) - 1;
+    memcpy(part, p, k);
+    part[k] = 0;
+    char* q = part;
+    while (*q == ' ' || *q == '\t') q++;
+    size_t e = strlen(q);
+    while (e && (q[e - 1] == ' ' || q[e - 1] == '\t')) q[--e] = 0;
+    char* out = NULL;
+    if (strncmp(q, "light:", 6) == 0) out = light, q += 6;
+    else if (strncmp(q, "dark:", 5) == 0) out = dark, q += 5;
+    while (*q == ' ' || *q == '\t') q++;
+    if (out) {
+      snprintf(out, cap, "%s", q);
+      any = true;
+    } else if (!any) {
+      snprintf(light, cap, "%s", q);
+      snprintf(dark, cap, "%s", q);
+    }
+    p += n;
+    if (*p == ',') p++;
+  }
+}
+
+// Every theme the value names is installed.
+static bool theme_value_ok(const char* value) {
+  char light[256], dark[256];
+  theme_parts(value, light, dark, sizeof(light));
+  return (light[0] || dark[0]) && (!light[0] || theme_exists(light)) &&
+         (!dark[0] || theme_exists(dark));
+}
+
+// A light/dark pair of two themes (the quick switch changes something).
+static bool theme_value_pair(const char* value) {
+  char light[256], dark[256];
+  theme_parts(value, light, dark, sizeof(light));
+  return light[0] && dark[0] && strcmp(light, dark) != 0;
+}
+
 // The theme chosen in the menu ("" for none: his config's).
 static void chosen_theme(char* out, size_t cap) {
   if (!read_value(L"theme.ghostty", "theme", out, cap)) out[0] = 0;
@@ -132,7 +199,7 @@ char* theme_config_file(void) {
   char name[256];
   chosen_theme(name, sizeof(name));
   if (!name[0]) return NULL;
-  if (!theme_exists(name)) {
+  if (!theme_value_ok(name)) {
     fprintf(stderr,
             "ghostty: theme.ghostty names a theme that is not installed: %s; "
             "using the config's (the file stays)\n",
@@ -173,8 +240,90 @@ static void set_scheme_mode(int mode) {
   test_event(ev);
 }
 
-// Ctrl+Shift+F12: Auto → Light → Dark → Auto.
-void scheme_cycle(void) { set_scheme_mode((scheme_mode() + 1) % 3); }
+// The theme in use: the one chosen here, else the last `theme =` of his
+// config file (its includes are not followed: a guess good enough for a
+// hint).
+static void theme_in_use(char* out, size_t cap) {
+  chosen_theme(out, cap);
+  if (out[0] && theme_value_ok(out)) return;
+  out[0] = 0;
+  ghostty_string_s s = ghostty_config_open_path();
+  WCHAR* path = s.ptr && s.len ? utf8_to_utf16(s.ptr, (int)s.len) : NULL;
+  ghostty_string_free(s);
+  if (!path) return;
+  FILE* f = _wfopen(path, L"rb");
+  free(path);
+  if (!f) return;
+  char line[512];
+  while (fgets(line, sizeof(line), f)) {
+    char* p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "theme", 5) != 0) continue;
+    p += 5;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '=') continue;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    size_t n = strcspn(p, "\r\n");
+    if (n >= cap) n = cap - 1;
+    memcpy(out, p, n);
+    out[n] = 0;
+  }
+  fclose(f);
+}
+
+// A line in the title bar for a few seconds (tabs.c paints it in the
+// motto's place).
+static WCHAR g_hint[200];
+#define HINT_TIMER 21
+
+const WCHAR* theme_hint(void) { return g_hint[0] ? g_hint : NULL; }
+
+static void hint_show(const WCHAR* text) {
+  swprintf(g_hint, 200, L"%ls", text);
+  for (Frame* f = g_frames; f; f = f->next) {
+    SetTimer(f->hwnd, HINT_TIMER, 4000, NULL);
+    update_title(f);  // the hint, with Windows' own caption
+    InvalidateRect(f->hwnd, NULL, FALSE);
+  }
+  char* t = utf16_to_utf8(text, -1);
+  Line e = {0};
+  put(&e, "{\"kind\":\"hint\",\"text\":");
+  put_string(&e, t ? t : "");
+  put(&e, "}");
+  test_event(e.p);
+  free(e.p);
+  free(t);
+}
+
+// WM_TIMER on a frame: the hint's time is up.
+bool theme_timer(Frame* f, WPARAM id) {
+  if (id != HINT_TIMER) return false;
+  for (Frame* g = g_frames; g; g = g->next) {
+    KillTimer(g->hwnd, HINT_TIMER);
+    InvalidateRect(g->hwnd, NULL, FALSE);
+  }
+  g_hint[0] = 0;
+  for (Frame* g = g_frames; g; g = g->next) update_title(g);
+  return true;
+}
+
+// Ctrl+Shift+F12: Auto → Light → Dark → Auto. The mode is kept either way
+// (for a pair chosen later); on a single theme the title bar says why
+// nothing changed.
+void scheme_cycle(void) {
+  static const WCHAR* const names[] = {L"Auto", L"Light", L"Dark"};
+  set_scheme_mode((scheme_mode() + 1) % 3);
+  char theme[512];
+  theme_in_use(theme, sizeof(theme));
+  WCHAR text[200];
+  if (theme_value_pair(theme))
+    swprintf(text, 200, L"%ls", names[scheme_mode()]);
+  else
+    swprintf(text, 200, L"%ls: this theme has no light/dark pair (Theme menu: pick a pair)",
+             names[scheme_mode()]);
+  hint_show(text);
+}
 
 // ---- choosing a theme ------------------------------------------------------------
 
@@ -210,12 +359,9 @@ void theme_menu_add(HMENU sys) {
   if (!m) return;
   AppendMenuW(m, MF_STRING, IDM_THEME_DEFAULT, L"Default (from my config)");
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-  for (int i = 0; i < NFAV; i++) {
-    if (!theme_exists(kFavourites[i])) continue;
-    WCHAR* w = utf8_to_utf16(kFavourites[i], -1);
-    if (w) AppendMenuW(m, MF_STRING, IDM_THEME_FAV + i * 0x10, w);
-    free(w);
-  }
+  for (int i = 0; i < NFAV; i++)
+    if (theme_exists(kPairs[i].light) && theme_exists(kPairs[i].dark))
+      AppendMenuW(m, MF_STRING, IDM_THEME_FAV + i * 0x10, kPairs[i].label);
   AppendMenuW(m, MF_STRING, IDM_THEME_MORE, L"More themes\u2026");
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
   AppendMenuW(m, MF_STRING, IDM_SCHEME_AUTO, L"Auto (follow Windows)\tCtrl+Shift+F12");
@@ -233,7 +379,9 @@ void theme_menu_update(HMENU sys) {
   bool fav = false;
   CheckMenuItem(sys, IDM_THEME_DEFAULT, MF_BYCOMMAND | (name[0] ? MF_UNCHECKED : MF_CHECKED));
   for (int i = 0; i < NFAV; i++) {
-    bool on = strcmp(name, kFavourites[i]) == 0;
+    char v[600];
+    pair_value(i, v, sizeof(v));
+    bool on = strcmp(name, v) == 0;
     fav = fav || on;
     CheckMenuItem(sys, IDM_THEME_FAV + i * 0x10, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
   }
@@ -495,7 +643,9 @@ bool theme_command(HWND hwnd, WPARAM wp) {
     return true;
   }
   if (id >= IDM_THEME_FAV && id < IDM_THEME_FAV + NFAV * 0x10) {
-    choose_theme(kFavourites[(id - IDM_THEME_FAV) / 0x10]);
+    char v[600];
+    pair_value((int)((id - IDM_THEME_FAV) / 0x10), v, sizeof(v));
+    choose_theme(v);
     return true;
   }
   return false;

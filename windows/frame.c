@@ -351,6 +351,9 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ACTIVATE:
       titlebar_update(f);
       break;
+    case WM_TIMER:
+      if (theme_timer(f, wp)) return 0;
+      break;
     case WM_SETTINGCHANGE:
       // Windows' light/dark app mode changed: light:/dark: themes follow.
       if (lp && wcscmp((LPCWSTR)lp, L"ImmersiveColorSet") == 0) color_scheme_apply();
