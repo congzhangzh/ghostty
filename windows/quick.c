@@ -33,6 +33,23 @@ static Frame* g_quick;
 static bool g_hotkey;
 static ULONGLONG g_taken_at;  // when the key was first found taken (0: not taken)
 static int g_retries;
+static bool g_said_taken;  // the "used by …" hint was shown this run (then "ready" closes it, once)
+
+static void key_name(UINT vk, UINT mods, WCHAR* out, size_t cap);
+
+// The key acquired after being found taken: logged, and, when he was told it
+// was taken, one hint that it is ready, so the first one is not left open.
+static void hotkey_acquired(UINT vk, UINT mods, const char* how) {
+  fprintf(stderr, "ghostty: Quick Terminal key acquired after %llu s (%s)\n",
+          g_taken_at ? (GetTickCount64() - g_taken_at) / 1000 : 0, how);
+  g_taken_at = 0;
+  if (!g_said_taken) return;
+  g_said_taken = false;
+  WCHAR name[64], text[160];
+  key_name(vk, mods, name, 64);
+  swprintf(text, 160, tr(L"Quick Terminal key %ls is ready"), name);
+  hint_show(text);
+}
 
 // ---- config --------------------------------------------------------------------
 
@@ -378,9 +395,7 @@ void quick_hotkey_update(void) {
   Holder h = g_hotkey ? HOLDER_OTHER : hotkey_holder();
   hotkey_event(vk, mods, g_hotkey, err, h, false);
   if (g_hotkey) {
-    if (g_taken_at)  // a config change found it free again
-      fprintf(stderr, "ghostty: Quick Terminal key acquired after %llu s\n", (GetTickCount64() - g_taken_at) / 1000);
-    g_taken_at = 0;
+    if (g_taken_at) hotkey_acquired(vk, mods, "a config change");
     return;
   }
   if (!g_taken_at) g_taken_at = GetTickCount64();
@@ -394,6 +409,7 @@ void quick_hotkey_update(void) {
   static bool said;
   if (said || h == HOLDER_GHOSTTY) return;
   said = true;
+  g_said_taken = true;
   WCHAR text[200];
   swprintf(text, 200,
            h == HOLDER_TERMINAL ? tr(L"Quick Terminal key %ls is used by Windows Terminal (its quake mode)")
@@ -417,8 +433,9 @@ bool quick_retry(WPARAM id) {
   g_retries++;
   if (g_hotkey) {
     hotkey_event(vk, mods, true, 0, HOLDER_OTHER, true);
-    fprintf(stderr, "ghostty: Quick Terminal key acquired after %llu s (retry %d)\n", secs, g_retries);
-    g_taken_at = 0;
+    char how[32];
+    snprintf(how, sizeof(how), "retry %d", g_retries);
+    hotkey_acquired(vk, mods, how);
   } else if (vk && (g_retries <= 12 || g_retries % 12 == 0)) {
     // Each try for the first minute, then once a minute.
     fprintf(stderr, "ghostty: Quick Terminal key retry %d after %llu s: error %lu, holder %s\n", g_retries, secs, err,
