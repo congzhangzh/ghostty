@@ -22,7 +22,7 @@
 
 typedef struct {
   const char* action;  // its key from the config, if it has one
-  const WCHAR* key;    // the key otherwise (the host's own, a global one)
+  const WCHAR* key;    // the key of an entry with no action (the host's own); else kDefaultKeys
   const WCHAR* label;  // English (tr)
 } SheetEntry;
 
@@ -36,6 +36,29 @@ typedef struct {
 // Ctrl+Insert) and the split focus keys (Ctrl+Alt+arrows, [ and ]) are
 // written here. Unbound on Windows, left out: Close Terminal (Ctrl+Shift+W
 // is Close Tab), Equalize Splits (a macOS key only).
+//
+// The keys of actions the lookup can't give, for the sheet AND the command
+// palette (palette.c), one table so they can't drift: performable ones (the
+// split focus keys) and keys the config doesn't hold as a plain trigger
+// (F11; the quick terminal's global Win+`).
+static const struct {
+  const char* action;
+  const WCHAR* key;
+} kDefaultKeys[] = {
+    {"goto_split:left", L"Ctrl+Alt+Left"},   {"goto_split:right", L"Ctrl+Alt+Right"},
+    {"goto_split:up", L"Ctrl+Alt+Up"},       {"goto_split:down", L"Ctrl+Alt+Down"},
+    {"goto_split:previous", L"Ctrl+Alt+["},  {"goto_split:next", L"Ctrl+Alt+]"},
+    {"toggle_fullscreen", L"F11"},           {"toggle_quick_terminal", L"Win+`"},
+};
+
+// That table's key for an action, or NULL.
+const WCHAR* default_key(const char* action) {
+  if (!action) return NULL;
+  for (size_t i = 0; i < sizeof(kDefaultKeys) / sizeof(kDefaultKeys[0]); i++)
+    if (strcmp(kDefaultKeys[i].action, action) == 0) return kDefaultKeys[i].key;
+  return NULL;
+}
+
 static const SheetGroup kGroups[] = {
     {L"Tabs",
      {{"new_tab", NULL, L"New Tab"},
@@ -46,18 +69,18 @@ static const SheetGroup kGroups[] = {
     {L"Splits",
      {{"new_split:right", NULL, L"Split Right"},
       {"new_split:down", NULL, L"Split Down"},
-      {"goto_split:left", L"Ctrl+Alt+Left", L"Focus Split: Left"},
-      {"goto_split:right", L"Ctrl+Alt+Right", L"Focus Split: Right"},
-      {"goto_split:up", L"Ctrl+Alt+Up", L"Focus Split: Up"},
-      {"goto_split:down", L"Ctrl+Alt+Down", L"Focus Split: Down"},
-      {"goto_split:previous", L"Ctrl+Alt+[", L"Focus Split: Previous"},
-      {"goto_split:next", L"Ctrl+Alt+]", L"Focus Split: Next"},
+      {"goto_split:left", NULL, L"Focus Split: Left"},
+      {"goto_split:right", NULL, L"Focus Split: Right"},
+      {"goto_split:up", NULL, L"Focus Split: Up"},
+      {"goto_split:down", NULL, L"Focus Split: Down"},
+      {"goto_split:previous", NULL, L"Focus Split: Previous"},
+      {"goto_split:next", NULL, L"Focus Split: Next"},
       {"toggle_split_zoom", NULL, L"Toggle Split Zoom"},
       {"equalize_splits", NULL, L"Equalize Splits"},
       {"close_surface", NULL, L"Close Terminal"}}},
     {L"Window & full screen",
      {{"new_window", NULL, L"New Window"},
-      {"toggle_fullscreen", L"F11", L"Toggle Fullscreen"},
+      {"toggle_fullscreen", NULL, L"Toggle Fullscreen"},
       {NULL, L"Alt+Space", L"Window menu"},
       {"close_window", NULL, L"Close Window"}}},
     {L"Clipboard & links",
@@ -78,7 +101,7 @@ static const SheetGroup kGroups[] = {
       {"reload_config", NULL, L"Reload Config"},
       {NULL, L"Ctrl+Shift+F12", L"Light / Dark / Auto"}}},
     // A global key: not in the config's lookup.
-    {L"Quick Terminal", {{"toggle_quick_terminal", L"Win+`", L"Show or hide"}}},
+    {L"Quick Terminal", {{"toggle_quick_terminal", NULL, L"Show or hide"}}},
 };
 #define NGROUPS ((int)(sizeof(kGroups) / sizeof(kGroups[0])))
 
@@ -94,7 +117,8 @@ static bool entry_text(const SheetEntry* e, WCHAR* key, WCHAR* label, size_t cap
     ghostty_input_trigger_s t = ghostty_config_trigger(g_config, e->action, strlen(e->action));
     trigger_text(t, key, cap);
   }
-  if (!key[0] && e->key) swprintf(key, cap, L"%ls", e->key);
+  if (!key[0] && (e->key || default_key(e->action)))
+    swprintf(key, cap, L"%ls", e->key ? e->key : default_key(e->action));
   if (!key[0]) return false;  // unbound: left out
   swprintf(label, cap, L"%ls", tr(e->label));
   return true;

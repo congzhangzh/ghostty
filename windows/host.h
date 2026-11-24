@@ -372,6 +372,7 @@ bool reveal_timer(Frame* f, WPARAM id);
 bool reveal_shown(Frame* f);
 bool open_url(ghostty_action_open_url_kind_e kind, const char* url, size_t len, bool dry);
 void trigger_text(ghostty_input_trigger_s t, WCHAR* out, size_t cap);
+const WCHAR* default_key(const char* action);  // sheet.c: keys the lookup can't give
 bool quick_timer(Frame* f, WPARAM id);
 void quick_activate(Frame* f, WPARAM wp, LPARAM lp);
 void quick_gone(Frame* f);

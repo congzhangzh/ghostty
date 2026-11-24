@@ -87,6 +87,9 @@ static void items_add_en(const WCHAR* title, const WCHAR* desc, const WCHAR* en_
     ghostty_input_trigger_s t = ghostty_config_trigger(g_config, action, strlen(action));
     trigger_text(t, it->key, 48);
   }
+  // A key the lookup can't give (the split focus keys: performable), from
+  // the cheat sheet's table (sheet.c), so the two show the same keys.
+  if (!it->key[0] && default_key(action)) swprintf(it->key, 48, L"%ls", default_key(action));
 }
 
 static void items_load(Frame* f) {
@@ -411,8 +414,22 @@ void palette_toggle(Window* w) {
     keyed += g_items[i].key[0] != 0;
     jumps += g_items[i].action == NULL;
   }
-  char ev[160];
-  snprintf(ev, sizeof(ev), "{\"kind\":\"palette\",\"what\":\"opened\",\"items\":%d,\"with_key\":%d,\"jumps\":%d,\"lang\":\"%s\"}",
-           g_nitems, keyed, jumps, tr_lang());
-  test_event(ev);
+  // With each keyed action's key, so a test can check one ("keys").
+  Line e = {0};
+  put(&e, "{\"kind\":\"palette\",\"what\":\"opened\",\"items\":%d,\"with_key\":%d,\"jumps\":%d,\"lang\":\"%s\",\"keys\":{",
+      g_nitems, keyed, jumps, tr_lang());
+  bool first = true;
+  for (int i = 0; i < g_nitems; i++) {
+    if (!g_items[i].action || !g_items[i].key[0]) continue;
+    char* k = utf16_to_utf8(g_items[i].key, -1);
+    if (!first) put(&e, ",");
+    first = false;
+    put_string(&e, g_items[i].action);
+    put(&e, ":");
+    put_string(&e, k ? k : "");
+    free(k);
+  }
+  put(&e, "}}");
+  test_event(e.p);
+  free(e.p);
 }
