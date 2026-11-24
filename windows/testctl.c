@@ -352,6 +352,13 @@ static void cmd_list(Line* b) {
         put_title(b, w->title);
         put(b, ",\"attention\":%s", w->attention ? "true" : "false");
         put_progress(b, w);
+        // Desktop notifications from this pane: how many, the last one's
+        // title and body exactly as received (before the toast's cuts).
+        put(b, ",\"notifications\":{\"count\":%d,\"title\":", w->notes);
+        put_string(b, w->note_title ? w->note_title : "");
+        put(b, ",\"body\":");
+        put_string(b, w->note_body ? w->note_body : "");
+        put(b, "}");
         put(b, "}");
       }
       put(b, "]");

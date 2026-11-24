@@ -336,6 +336,15 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       return true;
 
     case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
+      if (w) {  // counted and kept as received, for the test pipe's "list"
+        const char* t = action.action.desktop_notification.title;
+        const char* bd = action.action.desktop_notification.body;
+        w->notes++;
+        free(w->note_title);
+        free(w->note_body);
+        w->note_title = _strdup(t ? t : "");
+        w->note_body = _strdup(bd ? bd : "");
+      }
       notify_toast(w, action.action.desktop_notification.title,
                    action.action.desktop_notification.body);
       // Not looked at (another tab, a split without the focus, another

@@ -165,6 +165,8 @@ struct Window {
   bool shown;
   int dropped;
   bool repaint_once;  // present the last frame again once (an overlay went: dxgi.c)
+  int notes;                  // desktop notifications received (OSC 9/777)
+  char *note_title, *note_body;  // the last one's, as received (UTF-8): for the test pipe
   bool attention;  // the bell rang, or a notification came while not looked at (tabs.c)
   uint64_t overlay_frames;  // frames the stats overlay was drawn on (DXGI path)
   HDC ov_dc;                // the readback DXGI path's overlay: a DIB of the frame (dxgi.c)

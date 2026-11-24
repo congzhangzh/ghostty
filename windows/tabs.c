@@ -1139,6 +1139,8 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       notify_tab_closed(w);
       pane_gone(f, w);
       free(w->title);
+      free(w->note_title);
+      free(w->note_body);
       free(w->ime_preedit);
       dxgi_pane_gone(w);
       free(w->bgra);
