@@ -297,15 +297,21 @@ WCHAR* stats_layout(Window* w, HDC dc, RECT rc, RECT* box) {
 
 // The panel's opacity: GHOSTTY_STATS_ALPHA in percent, 60 by default (the
 // owner: "can it be light, so I can see underlay?").
+// On a light theme at least 80 (lane B's demo: under 60 a white page with
+// dark text shows through as a grey box with dark text in it).
 static BYTE stats_alpha(void) {
   static int pct = -1;
+  static bool set;
   if (pct < 0) {
     const char* v = getenv("GHOSTTY_STATS_ALPHA");
+    set = v != NULL;
     pct = v ? atoi(v) : 60;
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
   }
-  return (BYTE)(pct * 255 / 100);
+  int luma = (GetRValue(g_bg) * 299 + GetGValue(g_bg) * 587 + GetBValue(g_bg) * 114) / 1000;
+  int p = !set && luma > 128 && pct < 80 ? 80 : pct;
+  return (BYTE)(p * 255 / 100);
 }
 
 // The box drawn off screen, then copied to dc in one go (each pixel once a
@@ -335,7 +341,8 @@ void present_stats(Window* w, HDC dc, RECT box, const WCHAR* text) {
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
     bmi.bmiHeader.biWidth = (LONG)w->frame_w;
-    bmi.bmiHeader.biHeight = (LONG)w->frame_h;  // bottom-up, as paint()
+    // Bottom-up, as paint(); the DXGI path keeps its rows top-first.
+    bmi.bmiHeader.biHeight = w->dxgi ? -(LONG)w->frame_h : (LONG)w->frame_h;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;

@@ -165,6 +165,10 @@ struct Window {
   bool shown;
   int dropped;
   uint64_t overlay_frames;  // frames the stats overlay was drawn on (DXGI path)
+  HDC ov_dc;                // the readback DXGI path's overlay: a DIB of the frame (dxgi.c)
+  HBITMAP ov_bmp;
+  void* ov_bits;
+  UINT ov_w, ov_h;
   uint64_t key_qpc;        // a key went down, no frame taken since
   uint64_t frame_key_qpc;  // the frame shown now is the first after it
   double latency_ms;       // that key to the end of its frame's paint

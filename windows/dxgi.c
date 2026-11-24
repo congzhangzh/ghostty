@@ -250,6 +250,12 @@ static void chain_free(Window* w) {
   w->dxgi_wait = NULL;
   w->dxgi_chain = NULL;
   w->dxgi_w = w->dxgi_h = 0;
+  if (w->ov_dc) DeleteDC(w->ov_dc);
+  if (w->ov_bmp) DeleteObject(w->ov_bmp);
+  w->ov_dc = NULL;
+  w->ov_bmp = NULL;
+  w->ov_bits = NULL;
+  w->ov_w = w->ov_h = 0;
 }
 
 static void shared_free(void** t) {
@@ -383,6 +389,53 @@ static void overlay(Window* w, ID3D11Texture2D* back, UINT width, UINT height) {
   IDXGISurface1_Release(s);
 }
 
+// The overlay on a frame's CPU pixels (the readback path): the frame is
+// copied into the pane's own top-down DIB section, the overlay drawn there
+// with GDI, and that is what goes to the swap chain. Not GetDC on the back
+// buffer: on windows-latest's Basic Render Driver about every other frame
+// went out without it (lane B's demo, run 45304911856, the speed scene).
+// NULL: no overlay (stats off) or no DIB; the caller uploads `bgra` as is.
+static const uint8_t* with_overlay(Window* w, const uint8_t* bgra, UINT width, UINT height) {
+  if (!w->frame || !w->frame->stats || !bgra) return NULL;
+  if (!w->ov_dc || w->ov_w != width || w->ov_h != height) {
+    if (w->ov_dc) DeleteDC(w->ov_dc);
+    if (w->ov_bmp) DeleteObject(w->ov_bmp);
+    w->ov_dc = NULL;
+    w->ov_bmp = NULL;
+    w->ov_bits = NULL;
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = (LONG)width;
+    bi.bmiHeader.biHeight = -(LONG)height;  // top-down, as the texture
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC dc = CreateCompatibleDC(NULL);
+    void* bits = NULL;
+    HBITMAP bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+    if (!bmp) {
+      if (dc) DeleteDC(dc);
+      return NULL;
+    }
+    SelectObject(dc, bmp);
+    w->ov_dc = dc;
+    w->ov_bmp = bmp;
+    w->ov_bits = bits;
+    w->ov_w = width;
+    w->ov_h = height;
+  }
+  memcpy(w->ov_bits, bgra, (size_t)width * height * 4);
+  RECT rc = {0, 0, (LONG)width, (LONG)height}, box;
+  WCHAR* text = stats_layout(w, w->ov_dc, rc, &box);
+  if (text) {
+    present_stats(w, w->ov_dc, box, text);
+    free(text);
+  }
+  GdiFlush();
+  w->overlay_frames++;
+  return w->ov_bits;
+}
+
 // paint() in the DXGI path: the overlay changes without a new frame, so
 // the last frame goes out again with it (a flip-discard back buffer holds
 // nothing after a present): the kept pixels, or the last shared texture.
@@ -391,11 +444,14 @@ void dxgi_repaint(Window* w) {
   ID3D11Texture2D* back = NULL;
   if (IDXGISwapChain1_GetBuffer((IDXGISwapChain1*)w->dxgi_chain, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK)
     return;
-  if (w->last_shared >= 0 && w->shared_tex[w->last_shared])
+  if (w->last_shared >= 0 && w->shared_tex[w->last_shared]) {
     ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource*)back, (ID3D11Resource*)w->shared_tex[w->last_shared]);
-  else if (w->bgra && w->dxgi_w && w->dxgi_h)
-    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource*)back, 0, NULL, w->bgra, w->dxgi_w * 4, 0);
-  overlay(w, back, w->dxgi_w, w->dxgi_h);
+    overlay(w, back, w->dxgi_w, w->dxgi_h);
+  } else if (w->bgra && w->dxgi_w && w->dxgi_h) {
+    const uint8_t* px = with_overlay(w, w->bgra, w->dxgi_w, w->dxgi_h);
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource*)back, 0, NULL, px ? px : w->bgra, w->dxgi_w * 4,
+                                          0);
+  }
   ID3D11Texture2D_Release(back);
   IDXGISwapChain1_Present((IDXGISwapChain1*)w->dxgi_chain, 0, 0);
 }
@@ -410,9 +466,9 @@ bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT 
   IDXGISwapChain1* sc = w->dxgi_chain;
   ID3D11Texture2D* back = NULL;
   if (IDXGISwapChain1_GetBuffer(sc, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK) goto fail;
-  ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource*)back, 0, NULL, bgra, stride, 0);
+  const uint8_t* px = stride == width * 4 ? with_overlay(w, bgra, width, height) : NULL;
+  ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource*)back, 0, NULL, px ? px : bgra, stride, 0);
   w->last_shared = -1;
-  overlay(w, back, width, height);
   ID3D11Texture2D_Release(back);
   HRESULT hr = IDXGISwapChain1_Present(sc, 1, 0);
   uint64_t t2 = qpc();
