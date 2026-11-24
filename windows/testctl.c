@@ -284,14 +284,26 @@ static void cmd_list(Line* b) {
         f->slogan_shown == 2 ? "slogan" : f->slogan_shown == 1 ? "motto" : "none",
         f->reveal_on ? "true" : "false");
     put_rect(b, f->hwnd);
-    RECT hr;
-    if (help_rect(f, &hr)) {  // the "?" button, on screen
-      POINT a = {hr.left, hr.top}, z = {hr.right, hr.bottom};
+    // The "?" button, on screen: the title bar's, or in full screen the
+    // reveal bar's while it shows (it sits at the frame's client top-left);
+    // there also its exit button ("exitfs", else null).
+    RECT hr, er;
+    bool bar = f->reveal_on && f->fullscreen;
+    if (bar) f->reveal_painting = true;
+    bool has_help = help_rect(f, &hr), has_exit = exitfs_rect(f, &er);
+    if (bar) f->reveal_painting = false;
+    const char* names[2] = {"help", "exitfs"};
+    bool has[2] = {has_help, has_exit};
+    RECT* rs[2] = {&hr, &er};
+    for (int k = 0; k < 2; k++) {
+      if (!has[k]) {
+        put(b, ",\"%s\":null", names[k]);
+        continue;
+      }
+      POINT a = {rs[k]->left, rs[k]->top}, z = {rs[k]->right, rs[k]->bottom};
       ClientToScreen(f->hwnd, &a);
       ClientToScreen(f->hwnd, &z);
-      put(b, ",\"help\":[%ld,%ld,%ld,%ld]", a.x, a.y, z.x - a.x, z.y - a.y);
-    } else {
-      put(b, ",\"help\":null");
+      put(b, ",\"%s\":[%ld,%ld,%ld,%ld]", names[k], a.x, a.y, z.x - a.x, z.y - a.y);
     }
     int pv = -1;
     const char* ps = notify_progress_state(f, &pv);  // notify.c: NULL for none
