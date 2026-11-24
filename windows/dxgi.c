@@ -11,7 +11,7 @@
 // through a DXGI flip-model swap chain, and finding out whether GL can share
 // a texture with D3D11 (WGL_NV_DX_interop2).
 //
-// GHOSTTY_PRESENT (opt-in, never the default):
+// GHOSTTY_PRESENT (opt-in; the default is readback, see present_mode_resolve):
 //   interop  the interop path when the extension is there; until its blit
 //            lands (step 3), frames go through the DXGI path below. Without
 //            the extension (Wine, Mesa, CI runners, likely Windows on Arm):
@@ -125,15 +125,17 @@ static bool interop_forced(void) {
 void present_mode_resolve(void) {
   const char* v = getenv("GHOSTTY_PRESENT");
   if (!v || !*v) {
-    // The default (the owner, 2026-11-23: "agree, 1 and 2"): the DXGI flip
-    // path, with interop when GL offers it; any failure falls back to GDI
-    // (said once). GHOSTTY_PRESENT=readback is the way back to GDI.
-    uint64_t t0 = qpc();
-    probe_gl();
-    _putenv(g_gl.interop ? "GHOSTTY_PRESENT=interop" : "GHOSTTY_PRESENT=dxgi");
-    fprintf(stderr, "ghostty: present: default %s (probe %.1f ms%s%s)\n", g_gl.interop ? "interop" : "dxgi",
-            (double)(qpc() - t0) * g_qpc_ms, g_gl.why ? ": " : "", g_gl.why ? g_gl.why : "");
-    v = getenv("GHOSTTY_PRESENT");
+    // The default is readback again (the owner, 2026-11-25: "Readback default
+    // (Recommended)"; it was DXGI, with interop when GL offers it, from
+    // 2026-11-23). Measured on his RTX 5070 laptop with .7 (measure.v3, full
+    // screen, a steady load): readback 108.7 fps, dxgi 58.6, interop 2.0 with
+    // the UI timer starved; and a Ghostty that did not end on close in 1 of 4
+    // dxgi runs and 2 of 4 interop runs, 0 of 4 readback. dxgi and interop
+    // stay opt-in (GHOSTTY_PRESENT=dxgi|interop) until the stall and the hang
+    // are found. Unset means readback everywhere (the host's DXGI path and
+    // the core's both ask for dxgi or interop), so no GL probe at start.
+    fprintf(stderr, "ghostty: present: default readback (GHOSTTY_PRESENT=dxgi or interop to opt in)\n");
+    return;
   }
   if (strcmp(v, "interop") != 0) return;
   probe_gl();
