@@ -26,6 +26,8 @@
 
 #define QUICK_HOTKEY 0x51  // the hotkey's id on the wakeup window
 #define QUICK_TIMER 22     // the slide's steps, on the quick frame
+#define QUICK_RETRY_TIMER 23  // a taken key tried again, on the wakeup window
+#define QUICK_RETRY_MS 5000
 
 static Frame* g_quick;
 static bool g_hotkey;
@@ -309,42 +311,103 @@ void trigger_text(ghostty_input_trigger_s t, WCHAR* out, size_t cap) {
   key_name(vk, mods, out, cap);
 }
 
-// (Re)register the global key from the config: at start and on each change.
-void quick_hotkey_update(void) {
-  if (g_hotkey) {
-    UnregisterHotKey(g_wakeup_hwnd, QUICK_HOTKEY);
-    g_hotkey = false;
+// Who holds the key when RegisterHotKey fails: Windows does not say, so the
+// likely ones are looked for. Windows Terminal binds Win+` by default (its
+// quake mode, globalSummon) while it runs; another Ghostty has a wakeup
+// window (message-only, our class) in another process.
+typedef enum { HOLDER_OTHER, HOLDER_GHOSTTY, HOLDER_TERMINAL } Holder;
+
+static Holder hotkey_holder(void) {
+  DWORD me = GetCurrentProcessId();
+  for (HWND h = NULL; (h = FindWindowExW(HWND_MESSAGE, h, L"GhosttyWakeup", NULL)) != NULL;) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid && pid != me) return HOLDER_GHOSTTY;
   }
-  if (!g_app || !g_config || !ghostty_app_has_global_keybinds(g_app)) return;
+  if (FindWindowW(L"CASCADIA_HOSTING_WINDOW_CLASS", NULL)) return HOLDER_TERMINAL;
+  return HOLDER_OTHER;
+}
+
+static const char* holder_name(Holder h) {
+  return h == HOLDER_GHOSTTY ? "ghostty" : h == HOLDER_TERMINAL ? "windows-terminal" : "other";
+}
+
+static bool hotkey_register(UINT* vk_out, UINT* mods_out) {
   static const char action[] = "toggle_quick_terminal";
   ghostty_input_trigger_s t = ghostty_config_trigger(g_config, action, strlen(action));
   UINT vk = trigger_vk(t);
-  if (!vk) return;
+  *vk_out = vk;
+  if (!vk) return false;
   UINT mods = MOD_NOREPEAT;
   if (t.mods & GHOSTTY_MODS_SHIFT) mods |= MOD_SHIFT;
   if (t.mods & GHOSTTY_MODS_CTRL) mods |= MOD_CONTROL;
   if (t.mods & GHOSTTY_MODS_ALT) mods |= MOD_ALT;
   if (t.mods & GHOSTTY_MODS_SUPER) mods |= MOD_WIN;
-  g_hotkey = RegisterHotKey(g_wakeup_hwnd, QUICK_HOTKEY, mods, vk);
-  char e[128];
-  snprintf(e, sizeof(e), "{\"kind\":\"quick\",\"what\":\"hotkey\",\"vk\":%u,\"mods\":%u,\"ok\":%s}",
-           vk, mods & ~MOD_NOREPEAT, g_hotkey ? "true" : "false");
+  *mods_out = mods;
+  return RegisterHotKey(g_wakeup_hwnd, QUICK_HOTKEY, mods, vk) != 0;
+}
+
+static void hotkey_event(UINT vk, UINT mods, bool ok, DWORD err, Holder h, bool retry) {
+  char e[200];
+  snprintf(e, sizeof(e),
+           "{\"kind\":\"quick\",\"what\":\"hotkey\",\"vk\":%u,\"mods\":%u,\"ok\":%s,\"error\":%lu,"
+           "\"holder\":\"%s\",\"retry\":%s}",
+           vk, mods & ~MOD_NOREPEAT, ok ? "true" : "false", ok ? 0ul : err, ok ? "" : holder_name(h),
+           retry ? "true" : "false");
   test_event(e);
-  if (!g_hotkey) {
-    DWORD err = GetLastError();
-    WCHAR name[64];
-    key_name(vk, mods, name, 64);
-    fprintf(stderr, "ghostty: the quick terminal's global key %ls is taken by another app (error %lu)\n",
-            name, err);
-    // Once a run, in the title bar too, so he is not left guessing.
-    static bool said;
-    if (!said) {
-      said = true;
-      WCHAR text[160];
-      swprintf(text, 160, tr(L"Quick Terminal key %ls is used by another app"), name);
-      hint_show(text);
-    }
+}
+
+// (Re)register the global key from the config: at start and on each change.
+// A key someone else holds is tried again every QUICK_RETRY_MS (on the
+// wakeup window's QUICK_RETRY_TIMER), so Ghostty takes it once they let go
+// (e.g. Windows Terminal closed); the hint is shown once a run, and not at
+// all when the holder is another Ghostty (its own quick terminal answers).
+void quick_hotkey_update(void) {
+  KillTimer(g_wakeup_hwnd, QUICK_RETRY_TIMER);
+  if (g_hotkey) {
+    UnregisterHotKey(g_wakeup_hwnd, QUICK_HOTKEY);
+    g_hotkey = false;
   }
+  if (!g_app || !g_config || !ghostty_app_has_global_keybinds(g_app)) return;
+  UINT vk = 0, mods = 0;
+  g_hotkey = hotkey_register(&vk, &mods);
+  if (!vk) return;
+  DWORD err = g_hotkey ? 0 : GetLastError();
+  Holder h = g_hotkey ? HOLDER_OTHER : hotkey_holder();
+  hotkey_event(vk, mods, g_hotkey, err, h, false);
+  if (g_hotkey) return;
+  WCHAR name[64];
+  key_name(vk, mods, name, 64);
+  fprintf(stderr, "ghostty: the quick terminal's global key %ls is taken (error %lu, holder %s); trying again\n",
+          name, err, holder_name(h));
+  SetTimer(g_wakeup_hwnd, QUICK_RETRY_TIMER, QUICK_RETRY_MS, NULL);
+  // Once a run, in the title bar too, so he is not left guessing.
+  static bool said;
+  if (said || h == HOLDER_GHOSTTY) return;
+  said = true;
+  WCHAR text[200];
+  swprintf(text, 200,
+           h == HOLDER_TERMINAL ? tr(L"Quick Terminal key %ls is used by Windows Terminal (its quake mode)")
+                                : tr(L"Quick Terminal key %ls is used by another app"),
+           name);
+  hint_show(text);
+}
+
+// WM_TIMER on the wakeup window: the taken key, tried again.
+bool quick_retry(WPARAM id) {
+  if (id != QUICK_RETRY_TIMER) return false;
+  if (g_hotkey || !g_app || !g_config) {
+    KillTimer(g_wakeup_hwnd, QUICK_RETRY_TIMER);
+    return true;
+  }
+  UINT vk = 0, mods = 0;
+  g_hotkey = hotkey_register(&vk, &mods);
+  if (!vk || g_hotkey) KillTimer(g_wakeup_hwnd, QUICK_RETRY_TIMER);
+  if (g_hotkey) {
+    hotkey_event(vk, mods, true, 0, HOLDER_OTHER, true);
+    fprintf(stderr, "ghostty: the quick terminal's global key is free again: registered\n");
+  }
+  return true;
 }
 
 // WM_HOTKEY on the wakeup window.

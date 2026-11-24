@@ -227,6 +227,7 @@ void color_scheme_apply(void) {
 static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_GHOSTTY_TESTCTL) return testctl_ui(lp);
   if (msg == WM_HOTKEY && quick_hotkey(wp)) return 0;  // the quick terminal's key
+  if (msg == WM_TIMER && quick_retry(wp)) return 0;    // that key, taken, tried again
   if (msg == WM_TIMER && wp == 7) {  // the stats period (stats.c)
     stats_tick_all();
     return 0;
