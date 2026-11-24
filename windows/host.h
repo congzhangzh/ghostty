@@ -379,6 +379,7 @@ void quick_gone(Frame* f);
 void quick_hotkey_update(void);
 bool quick_hotkey(WPARAM id);
 bool quick_retry(WPARAM id);
+extern bool g_batch;  // GHOSTTY_BATCH=1 (main.c)
 const WCHAR* theme_hint(void);
 void hint_show(const WCHAR* text);
 const WCHAR* tr(const WCHAR* en);  // the display language's text (i18n.c)

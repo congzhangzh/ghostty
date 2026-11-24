@@ -42,8 +42,35 @@ void print_text(const char* s) {
       return;
     }
   }
-  MessageBoxW(NULL, ws, L"Ghostty build info", MB_OK | MB_ICONINFORMATION);
+  if (g_batch)
+    fputs(s, stderr);  // batch mode: no box waiting for a click
+  else
+    MessageBoxW(NULL, ws, L"Ghostty build info", MB_OK | MB_ICONINFORMATION);
   free(ws);
+}
+
+// ---- batch mode -----------------------------------------------------------------
+//
+// GHOSTTY_BATCH=1: for scripts, tests and demos (the owner, 2026-11-24:
+// "should not show the new about and release window automatically").
+// Nothing opens by itself and nothing waits for a click: no What's new
+// after an upgrade (whatsnew-seen.txt is left alone, so the next normal
+// start shows it once), no first-full-screen hint (not marked seen either),
+// no Quick Terminal key hints, the OpenGL message boxes and /buildinfo go
+// to stderr (the exit code says a failure), and the clipboard confirmations
+// are DENIED (never allowed unasked), with a stderr line. What is clicked
+// (menus, About, What's new, ?) still works. An environment variable only:
+// on Windows the core reads the process's command line itself (the PEB's,
+// src/global.zig), so a host-only flag would reach it as an unknown field.
+// It is taken out of the environment, so the shells inside don't inherit it.
+bool g_batch;
+
+static void batch_init(void) {
+  const char* e = getenv("GHOSTTY_BATCH");
+  if (!e) return;
+  g_batch = strcmp(e, "1") == 0;
+  SetEnvironmentVariableW(L"GHOSTTY_BATCH", NULL);
+  _putenv("GHOSTTY_BATCH=");
 }
 
 static bool buildinfo_mode(int argc, char** argv) {
@@ -246,6 +273,7 @@ static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int main(int argc, char** argv) {
   int rc = 0;
   if (report_mode(&rc)) return rc;
+  batch_init();
   if (buildinfo_mode(argc, argv)) return 0;
 #ifdef GHOSTTY_PRESENT_DEFAULT_SWAP
   // A dogfood build (HOST_PRESENT_DEFAULT=swap for windows/build.sh): the
@@ -257,6 +285,7 @@ int main(int argc, char** argv) {
   if (stats_client_mode(argc, argv, &rc)) return rc;
   if (ctl_client_mode(argc, argv, &rc)) return rc;
   stderr_guard_start();
+  if (g_batch) fprintf(stderr, "ghostty: batch mode: nothing opens by itself, no dialog waits for a click\n");
   g_main_tid = GetCurrentThreadId();
   LARGE_INTEGER freq;
   QueryPerformanceFrequency(&freq);

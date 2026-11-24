@@ -164,7 +164,7 @@ void reveal_fullscreen(Frame* f, bool on) {
   f->reveal_dwell = f->reveal_away = 0;
   SetTimer(f->hwnd, REVEAL_TIMER, REVEAL_TICK, NULL);
   char seen[16];
-  if (!host_ini_get("fullscreen_hint", seen, sizeof(seen))) {
+  if (!g_batch && !host_ini_get("fullscreen_hint", seen, sizeof(seen))) {
     host_ini_set("fullscreen_hint", "seen");
     hint_show(tr(L"Move the mouse to the top for tabs and ?, F11 to exit"));
     reveal_show(f);

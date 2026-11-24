@@ -48,7 +48,7 @@ static void hotkey_acquired(UINT vk, UINT mods, const char* how) {
   WCHAR name[64], text[160];
   key_name(vk, mods, name, 64);
   swprintf(text, 160, tr(L"Quick Terminal key %ls is ready"), name);
-  hint_show(text);
+  if (!g_batch) hint_show(text);
 }
 
 // ---- config --------------------------------------------------------------------
@@ -407,7 +407,7 @@ void quick_hotkey_update(void) {
   SetTimer(g_wakeup_hwnd, QUICK_RETRY_TIMER, QUICK_RETRY_MS, NULL);
   // Once a run, in the title bar too, so he is not left guessing.
   static bool said;
-  if (said || h == HOLDER_GHOSTTY) return;
+  if (said || h == HOLDER_GHOSTTY || g_batch) return;
   said = true;
   g_said_taken = true;
   WCHAR text[200];

@@ -110,16 +110,27 @@ static bool have_mesa(void) {
   return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
 }
 
+// A message box, or in batch mode (nothing waits for a click) the text on
+// stderr; the exit code says it failed either way.
+static void say(const WCHAR* text, const WCHAR* title) {
+  if (!g_batch) {
+    MessageBoxW(NULL, text, title, MB_OK | MB_ICONERROR);
+    return;
+  }
+  char* t = utf16_to_utf8(text, -1);
+  fprintf(stderr, "ghostty: batch mode: %s\n", t ? t : "(no text)");
+  free(t);
+}
+
 void glcheck_explain(void) {
   const char* driver = ghostty_windows_gl_driver();
   if (strcmp(driver, "none") != 0) {
     // A context was made, so OpenGL is not why the window failed.
     fprintf(stderr, "ghostty: the first window could not be created (OpenGL: %s)\n", driver);
-    MessageBoxW(NULL,
-                L"Ghostty could not create its first window.\n\n"
-                L"OpenGL works here, so the cause is elsewhere: the log says "
-                L"more (start Ghostty from a console with GHOSTTY_LOG=stderr).",
-                L"Ghostty", MB_OK | MB_ICONERROR);
+    say(L"Ghostty could not create its first window.\n\n"
+        L"OpenGL works here, so the cause is elsewhere: the log says "
+        L"more (start Ghostty from a console with GHOSTTY_LOG=stderr).",
+        L"Ghostty");
     return;
   }
   char sys[512];
@@ -151,5 +162,5 @@ void glcheck_explain(void) {
                    : "- Update the graphics driver: Ghostty needs OpenGL 4.3.\n");
   WCHAR wtext[2048];
   if (!MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext, 2048)) wcscpy(wtext, L"Ghostty could not start: no OpenGL 4.3.");
-  MessageBoxW(NULL, wtext, L"Ghostty: no OpenGL 4.3", MB_OK | MB_ICONERROR);
+  say(wtext, L"Ghostty: no OpenGL 4.3");
 }

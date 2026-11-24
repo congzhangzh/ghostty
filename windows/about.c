@@ -151,6 +151,10 @@ bool about_command(HWND hwnd, WPARAM wp) {
 // Once after an upgrade: What's new, if this build has notes and another
 // build was seen last (or none). The build is then recorded either way.
 void whatsnew_once(HWND owner) {
+  if (g_batch) {  // not shown, and not marked seen: the next normal start shows it
+    fprintf(stderr, "ghostty: batch mode: what's new not shown (whatsnew-seen.txt left as it is)\n");
+    return;
+  }
   const char* v = getenv("GHOSTTY_WHATSNEW");
   WCHAR dir[MAX_PATH], path[MAX_PATH + 32];
   DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH);

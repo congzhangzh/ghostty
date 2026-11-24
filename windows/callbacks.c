@@ -105,7 +105,13 @@ void confirm_read_clipboard_cb(void* ud,
   const WCHAR* what = req == GHOSTTY_CLIPBOARD_REQUEST_PASTE
                           ? tr(L"The text you are pasting may run commands. Paste it?")
                           : tr(L"A program in the terminal wants to read the clipboard. Allow it?");
-  int r = MessageBoxW(w->frame->hwnd, what, L"Ghostty", MB_YESNO | MB_ICONWARNING);
+  // Batch mode: denied, never allowed unasked.
+  int r = IDNO;
+  if (g_batch)
+    fprintf(stderr, "ghostty: batch mode: clipboard %s denied (a confirmation would be asked)\n",
+            req == GHOSTTY_CLIPBOARD_REQUEST_PASTE ? "paste" : "read");
+  else
+    r = MessageBoxW(w->frame->hwnd, what, L"Ghostty", MB_YESNO | MB_ICONWARNING);
   if (r == IDYES) {
     ghostty_clipboard_complete_s done = {c->contents, c->contents_len,
                                          c->available, c->available_len,
@@ -124,6 +130,10 @@ void write_clipboard_cb(void* ud, ghostty_clipboard_e which,
   for (size_t i = 0; i < len; i++) {
     if (!contents[i].mime || strncmp(contents[i].mime, "text/plain", 10) != 0)
       continue;
+    if (confirm && g_batch) {
+      fprintf(stderr, "ghostty: batch mode: clipboard write denied (a confirmation would be asked)\n");
+      return;
+    }
     if (confirm &&
         MessageBoxW(w->frame->hwnd,
                     tr(L"A program in the terminal wants to set the clipboard. Allow it?"),
