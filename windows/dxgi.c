@@ -125,7 +125,7 @@ static bool interop_forced(void) {
 void present_mode_resolve(void) {
   const char* v = getenv("GHOSTTY_PRESENT");
   if (!v || !*v) {
-    // The default is readback again (the owner, 2026-11-25: "Readback default
+    // The default is readback again (the owner, 2026-11-24: "Readback default
     // (Recommended)"; it was DXGI, with interop when GL offers it, from
     // 2026-11-23). Measured on his RTX 5070 laptop with .7 (measure.v3, full
     // screen, a steady load): readback 108.7 fps, dxgi 58.6, interop 2.0 with
