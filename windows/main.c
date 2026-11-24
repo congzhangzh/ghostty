@@ -75,14 +75,19 @@ static bool buildinfo_mode(int argc, char** argv) {
 // the window menu (theme.c: theme.ghostty), the command line, the files
 // they include; its problems on stderr. theme_file: NULL for the chosen
 // one, "" for none, else that file (the picker's preview).
-ghostty_config_t config_load_with(const char* theme_file) {
+// The config: his files, then what the window menu chose (theme.ghostty,
+// font.ghostty, shell.ghostty, beside them; his own files are never
+// written), then `extra` (a preview's lines) on top, then the command line.
+ghostty_config_t config_load_with(const char* extra) {
   ghostty_config_t c = ghostty_config_new();
   if (!c) return NULL;
   ghostty_config_load_default_files(c);
-  char* chosen = theme_file ? NULL : theme_config_file();
-  const char* t = theme_file ? theme_file : chosen;
-  if (t && *t) ghostty_config_load_file(c, t);
-  free(chosen);
+  char* chosen[3] = {theme_config_file(), font_config_file(), shell_config_file()};
+  for (int i = 0; i < 3; i++) {
+    if (chosen[i]) ghostty_config_load_file(c, chosen[i]);
+    free(chosen[i]);
+  }
+  if (extra && *extra) ghostty_config_load_file(c, extra);
   ghostty_config_load_cli_args(c);
   ghostty_config_load_recursive_files(c);
   ghostty_config_finalize(c);

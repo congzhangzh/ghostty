@@ -314,7 +314,9 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (titlebar_active(f)) return titlebar_hit(f, wp, lp);
       break;
     case WM_SYSCOMMAND:
-      if (about_command(hwnd, wp) || theme_command(hwnd, wp)) return 0;
+      if (about_command(hwnd, wp) || theme_command(hwnd, wp) || font_command(hwnd, wp) ||
+          shell_command(hwnd, wp))
+        return 0;
       break;
     // Windows' caption buttons when DwmDefWindowProc did not take the click:
     // the press is ours (DefWindowProc would draw a classic button), the

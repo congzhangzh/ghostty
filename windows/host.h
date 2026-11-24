@@ -334,7 +334,7 @@ void test_event(const char* json_object);
 void ime_drive(Window* w, const char* comp, int commit, Line* b);
 void present_stats_json(Line* b);  // dxgi.c
 const char* dxgi_adapter(void);
-ghostty_config_t config_load_with(const char* theme_file);
+ghostty_config_t config_load_with(const char* extra);
 void config_reload(ghostty_surface_t surface, bool soft);
 char* theme_config_file(void);
 int scheme_mode(void);
@@ -366,6 +366,24 @@ void theme_menu_add(HMENU sys);
 void theme_menu_update(HMENU sys);
 bool theme_command(HWND hwnd, WPARAM wp);
 void theme_picker_open(Frame* f);
+// theme.c's small files beside the config (%LOCALAPPDATA%\ghostty), the
+// preview and the picker, for font.c and shell.c too.
+bool host_path(const WCHAR* name, WCHAR* out, size_t cap);
+void write_text(const WCHAR* name, const char* text);
+bool read_value(const WCHAR* name, const char* key, char* out, size_t cap);
+void config_preview(Frame* f, const char* text);
+void picker_open(Frame* f, const WCHAR* title, char** names, int n, void (*preview_fn)(const char*),
+                 void (*choose_fn)(const char*));
+void menus_update(void);
+// Font ▸ (font.c) and Shell ▸ (shell.c) in the window menu.
+char* font_config_file(void);
+void font_menu_add(HMENU sys);
+void font_menu_update(HMENU sys);
+bool font_command(HWND hwnd, WPARAM wp);
+char* shell_config_file(void);
+void shell_menu_add(HMENU sys);
+void shell_menu_update(HMENU sys);
+bool shell_command(HWND hwnd, WPARAM wp);
 void config_changed(ghostty_config_t config);
 void config_open(void);
 void color_scheme_apply(void);

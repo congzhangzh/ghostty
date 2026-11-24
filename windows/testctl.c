@@ -503,6 +503,26 @@ static bool cmd_menu(const JObj* o, Line* b) {
     put(b, ",\"error\":\"menu: none\"");
     return false;
   }
+  // {"cmd":"menu","invoke":<id>}: as a click on that item (posted, so the
+  // pipe answers first; its effect shows in "events"). {"cmd":"menu",
+  // "open":true}: the window menu opens at its usual place (Alt+Space's),
+  // for a screenshot; Esc (real input) closes it.
+  long id = 0;
+  if (jint(o, "invoke", &id)) {
+    if (id <= 0 || id >= 0xF000) {
+      put(b, ",\"error\":\"menu: invoke: not a menu id\"");
+      return false;
+    }
+    PostMessageW(f->hwnd, WM_SYSCOMMAND, (WPARAM)id, 0);
+    put(b, ",\"invoked\":%ld", id);
+    return true;
+  }
+  const JField* open = jget(o, "open");
+  if (open) {
+    PostMessageW(f->hwnd, WM_SYSCOMMAND, SC_KEYMENU, ' ');
+    put(b, ",\"opened\":true");
+    return true;
+  }
   put(b, ",\"items\":[");
   bool first = true;
   menu_items(b, m, 0, &first);

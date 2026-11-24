@@ -55,6 +55,8 @@ void about_menu_add(HWND hwnd) {
   AppendMenuW(m, MF_STRING, IDM_OPEN_CONFIG, tr(L"Open config…"));
   AppendMenuW(m, MF_STRING, IDM_RELOAD_CONFIG, tr(L"Reload config"));
   theme_menu_add(m);  // Theme ▸ (theme.c)
+  font_menu_add(m);   // Font ▸ (font.c)
+  shell_menu_add(m);  // Shell ▸ (shell.c)
 }
 
 // Microsoft's ConPTY is used when its files are beside ghostty.exe (and

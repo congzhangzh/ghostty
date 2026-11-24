@@ -49,11 +49,10 @@ static void pair_value(int i, char* out, size_t cap) {
 }
 
 static int g_scheme_mode = -1;  // 0 auto, 1 light, 2 dark (host.ini)
-static void menus_update(void);
 
 // ---- files -------------------------------------------------------------------
 
-static bool host_path(const WCHAR* name, WCHAR* out, size_t cap) {
+bool host_path(const WCHAR* name, WCHAR* out, size_t cap) {
   WCHAR dir[MAX_PATH];
   DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH);
   if (n == 0 || n >= MAX_PATH) return false;
@@ -61,7 +60,7 @@ static bool host_path(const WCHAR* name, WCHAR* out, size_t cap) {
   return true;
 }
 
-static void write_text(const WCHAR* name, const char* text) {
+void write_text(const WCHAR* name, const char* text) {
   WCHAR dir[MAX_PATH + 32], path[MAX_PATH + 64];
   if (!host_path(NULL, dir, MAX_PATH + 32) || !host_path(name, path, MAX_PATH + 64)) return;
   CreateDirectoryW(dir, NULL);
@@ -72,7 +71,7 @@ static void write_text(const WCHAR* name, const char* text) {
 }
 
 // The value of `key = value` in a small file (UTF-8), or false.
-static bool read_value(const WCHAR* name, const char* key, char* out, size_t cap) {
+bool read_value(const WCHAR* name, const char* key, char* out, size_t cap) {
   WCHAR path[MAX_PATH + 64];
   if (!host_path(name, path, MAX_PATH + 64)) return false;
   FILE* f = _wfopen(path, L"rb");
@@ -427,10 +426,12 @@ void theme_menu_update(HMENU sys) {
   CheckMenuRadioItem(sys, IDM_SCHEME_AUTO, IDM_SCHEME_DARK,
                      mode == 1 ? IDM_SCHEME_LIGHT : mode == 2 ? IDM_SCHEME_DARK : IDM_SCHEME_AUTO,
                      MF_BYCOMMAND);
+  font_menu_update(sys);   // font.c
+  shell_menu_update(sys);  // shell.c
 }
 
 // Every frame's marks, after a change.
-static void menus_update(void) {
+void menus_update(void) {
   for (Frame* f = g_frames; f; f = f->next) {
     HMENU m = GetSystemMenu(f->hwnd, FALSE);
     if (m) theme_menu_update(m);
@@ -441,9 +442,15 @@ static void menus_update(void) {
 
 static HWND g_pick, g_pick_edit, g_pick_list;
 static Frame* g_pick_frame;
-static char** g_names;
+static char** g_names;  // the themes (load_names)
 static int g_nnames;
 static WNDPROC g_edit_proc;
+// The list the picker shows and what it does: the themes, or what
+// picker_open was given (font.c's fonts).
+static char** g_list;
+static int g_nlist;
+static void (*g_pick_preview)(const char* name);  // NULL: back as it was
+static void (*g_pick_choose)(const char* name);
 
 static int cmp_name(const void* a, const void* b) {
   return _stricmp(*(char* const*)a, *(char* const*)b);
@@ -486,22 +493,20 @@ static void load_names(void) {
   g_nnames = k;
 }
 
-// One window's panes with `theme` in place of the chosen one (NULL: back
-// to the config as it is).
-static void preview(const char* theme) {
+// One window's panes with `text` (config lines) on top of the config and
+// the chosen files (NULL: back to the config as it is). A preview only:
+// the other windows and the files are left alone.
+void config_preview(Frame* f, const char* text) {
   char* path8 = NULL;
-  if (theme) {
-    char text[300];
-    snprintf(text, sizeof(text), "theme = %s\n", theme);
-    write_text(L"theme-preview.ghostty", text);
+  if (text) {
+    write_text(L"preview.ghostty", text);
     WCHAR path[MAX_PATH + 64];
-    if (host_path(L"theme-preview.ghostty", path, MAX_PATH + 64)) path8 = utf16_to_utf8(path, -1);
+    if (host_path(L"preview.ghostty", path, MAX_PATH + 64)) path8 = utf16_to_utf8(path, -1);
     if (!path8) return;
   }
   ghostty_config_t c = config_load_with(path8);
   free(path8);
   if (!c) return;
-  Frame* f = g_pick_frame;
   for (Frame* g = g_frames; g; g = g->next)
     if (g == f)
       for (int i = 0; i < f->ntabs; i++) {
@@ -512,6 +517,20 @@ static void preview(const char* theme) {
   ghostty_config_free(c);
 }
 
+static void theme_preview(const char* theme) {
+  if (!theme) {
+    config_preview(g_pick_frame, NULL);
+    return;
+  }
+  char text[300];
+  snprintf(text, sizeof(text), "theme = %s\n", theme);
+  config_preview(g_pick_frame, text);
+}
+
+static void preview(const char* name) {
+  if (g_pick_preview) g_pick_preview(name);
+}
+
 static void fill_list(void) {
   WCHAR wq[128];
   GetWindowTextW(g_pick_edit, wq, 128);
@@ -519,14 +538,14 @@ static void fill_list(void) {
   for (char* p = q; p && *p; p++) *p = (char)tolower((unsigned char)*p);
   SendMessageW(g_pick_list, WM_SETREDRAW, FALSE, 0);
   SendMessageW(g_pick_list, LB_RESETCONTENT, 0, 0);
-  for (int i = 0; i < g_nnames; i++) {
+  for (int i = 0; i < g_nlist; i++) {
     char low[256];
-    size_t n = strlen(g_names[i]);
+    size_t n = strlen(g_list[i]);
     if (n >= sizeof(low)) n = sizeof(low) - 1;
-    for (size_t k = 0; k < n; k++) low[k] = (char)tolower((unsigned char)g_names[i][k]);
+    for (size_t k = 0; k < n; k++) low[k] = (char)tolower((unsigned char)g_list[i][k]);
     low[n] = 0;
     if (q && *q && !strstr(low, q)) continue;
-    WCHAR* w = utf8_to_utf16(g_names[i], -1);
+    WCHAR* w = utf8_to_utf16(g_list[i], -1);
     if (!w) continue;
     LRESULT at = SendMessageW(g_pick_list, LB_ADDSTRING, 0, (LPARAM)w);
     SendMessageW(g_pick_list, LB_SETITEMDATA, (WPARAM)at, (LPARAM)i);
@@ -540,7 +559,7 @@ static const char* selected_name(void) {
   LRESULT sel = SendMessageW(g_pick_list, LB_GETCURSEL, 0, 0);
   if (sel == LB_ERR) return NULL;
   LRESULT i = SendMessageW(g_pick_list, LB_GETITEMDATA, (WPARAM)sel, 0);
-  return i >= 0 && i < g_nnames ? g_names[i] : NULL;
+  return i >= 0 && i < g_nlist ? g_list[i] : NULL;
 }
 
 static void select_row(int row) {
@@ -556,11 +575,11 @@ static void pick_close(bool keep) {
   if (!g_pick) return;
   const char* name = keep ? selected_name() : NULL;
   if (name)
-    choose_theme(name);  // every window, and theme.ghostty
+    g_pick_choose(name);  // every window, and its file
   else
     preview(NULL);  // back to what it was
   WCHAR path[MAX_PATH + 64];
-  if (host_path(L"theme-preview.ghostty", path, MAX_PATH + 64)) DeleteFileW(path);
+  if (host_path(L"preview.ghostty", path, MAX_PATH + 64)) DeleteFileW(path);
   DestroyWindow(g_pick);
 }
 
@@ -610,13 +629,19 @@ static LRESULT CALLBACK pick_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
   return DefWindowProcW(h, msg, wp, lp);
 }
 
-// "More themes…": a small window over f with a search box and the list.
-void theme_picker_open(Frame* f) {
+// A small window over f with a search box and the list: names, a live
+// preview of the selected one on f (Enter keeps it: choose; Esc reverts).
+// The names stay the caller's.
+void picker_open(Frame* f, const WCHAR* title, char** names, int n, void (*preview_fn)(const char*),
+                 void (*choose_fn)(const char*)) {
   if (g_pick) {
     SetForegroundWindow(g_pick);
     return;
   }
-  load_names();
+  g_list = names;
+  g_nlist = n;
+  g_pick_preview = preview_fn;
+  g_pick_choose = choose_fn;
   static bool registered;
   if (!registered) {
     WNDCLASSEXW wc = {sizeof(wc)};
@@ -631,7 +656,7 @@ void theme_picker_open(Frame* f) {
   GetWindowRect(f->hwnd, &fr);
   int w = (int)(360 * f->scale), h = (int)(460 * f->scale);
   g_pick_frame = f;
-  g_pick = CreateWindowExW(WS_EX_TOOLWINDOW, L"GhosttyThemePicker", L"Ghostty themes",
+  g_pick = CreateWindowExW(WS_EX_TOOLWINDOW, L"GhosttyThemePicker", title,
                            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
                            fr.left + ((fr.right - fr.left) - w) / 2, fr.top + 60, w, h, f->hwnd,
                            NULL, g_inst, NULL);
@@ -653,6 +678,16 @@ void theme_picker_open(Frame* f) {
   SendMessageW(g_pick, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
   ShowWindow(g_pick, SW_SHOW);
   SetFocus(g_pick_edit);
+  Line e = {0};
+  put(&e, "{\"kind\":\"picker\",\"what\":\"opened\",\"rows\":%d}", n);
+  test_event(e.p);
+  free(e.p);
+}
+
+// "More themes…".
+void theme_picker_open(Frame* f) {
+  load_names();
+  picker_open(f, L"Ghostty themes", g_names, g_nnames, theme_preview, choose_theme);
 }
 
 // ---- the window menu's theme items --------------------------------------------------
