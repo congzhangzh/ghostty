@@ -7,6 +7,29 @@ void take_frame(Window* w) {
   ghostty_frame_s f = {0};  // zeroed: a lib older than this header leaves its new fields (shared) alone
   if (!ghostty_surface_take_frame(w->surface, &f)) return;
 
+  // A new pane's first frame must be at the size the host gave it. The
+  // renderer can draw one before that, at the surface's starting size and
+  // not yet painted (on windows-latest: a white box over part of a new tab
+  // for a frame, lane B's demo). Dropped until then (10 at most, so a pane
+  // is never left blank); after the first, every frame goes (a resize
+  // shows the old size until the new one comes).
+  if (!w->shown && f.pixels && w->dropped < 10 && (f.width != w->set_w || f.height != w->set_h)) {
+    w->dropped++;
+    char e[160];
+    snprintf(e, sizeof(e), "{\"kind\":\"frame\",\"what\":\"dropped\",\"pane\":%d,\"size\":[%u,%u],\"want\":[%u,%u]}",
+             w->id, f.width, f.height, w->set_w, w->set_h);
+    test_event(e);
+    ghostty_frame_free(&f);
+    return;
+  }
+  if (!w->shown) {
+    w->shown = true;
+    char e[160];
+    snprintf(e, sizeof(e), "{\"kind\":\"frame\",\"what\":\"first\",\"pane\":%d,\"size\":[%u,%u],\"want\":[%u,%u],\"dropped\":%d}",
+             w->id, f.width, f.height, w->set_w, w->set_h, w->dropped);
+    test_event(e);
+  }
+
   if (!f.pixels && f.shared && w->dxgi) {
     // Interop: drawn into a shared texture; the GPU copies it to the
     // swap chain (dxgi.c). No pixels went through the CPU.
@@ -92,6 +115,15 @@ void paint(Window* w) {
     // The DXGI swap chain owns the window's pixels; the stats overlay is
     // drawn on its back buffer (dxgi.c), and goes out again here when it
     // changed without a new frame.
+    // Before its first frame (no swap chain yet), the pane is the theme's
+    // background, not whatever the window had.
+    if (!w->dxgi_chain) {
+      RECT rc;
+      GetClientRect(w->hwnd, &rc);
+      HBRUSH bg = CreateSolidBrush(g_bg);
+      FillRect(dc, &rc, bg);
+      DeleteObject(bg);
+    }
     EndPaint(w->hwnd, &ps);
     dxgi_repaint(w);
     return;
@@ -134,8 +166,10 @@ void paint(Window* w) {
       RECT r = {0, (LONG)w->frame_h, (LONG)w->frame_w, rc.bottom};
       FillRect(dc, &r, black);
     }
-  } else {
-    FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+  } else {  // no frame yet: the theme's background
+    HBRUSH bg = CreateSolidBrush(g_bg);
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
   }
   RestoreDC(dc, saved);
   if (stats) {

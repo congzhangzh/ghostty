@@ -159,6 +159,11 @@ struct Window {
   UINT shared_w, shared_h;
   uint64_t interop_frames;
   int last_shared;          // the shared texture last presented, -1 none
+  // The size the host last gave the surface, and whether a frame has been
+  // shown yet: the first one must have that size (paint.c take_frame).
+  uint32_t set_w, set_h;
+  bool shown;
+  int dropped;
   uint64_t overlay_frames;  // frames the stats overlay was drawn on (DXGI path)
   uint64_t key_qpc;        // a key went down, no frame taken since
   uint64_t frame_key_qpc;  // the frame shown now is the first after it

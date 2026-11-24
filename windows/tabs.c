@@ -530,9 +530,12 @@ bool insert_tab(Frame* f, Window* w, int at) {
 void size_tab(Window* w) {
   RECT rc;
   GetClientRect(w->hwnd, &rc);
-  if (rc.right > 0 && rc.bottom > 0)
+  if (rc.right > 0 && rc.bottom > 0) {
+    w->set_w = (uint32_t)rc.right;
+    w->set_h = (uint32_t)rc.bottom;
     ghostty_surface_set_size(w->surface, (uint32_t)rc.right,
                              (uint32_t)rc.bottom);
+  }
 }
 
 // A new pane in f: its child window and its surface, inheriting the
@@ -1067,8 +1070,11 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       break;
 
     case WM_SIZE:
-      if (wp != SIZE_MINIMIZED && LOWORD(lp) && HIWORD(lp))
+      if (wp != SIZE_MINIMIZED && LOWORD(lp) && HIWORD(lp)) {
+        w->set_w = LOWORD(lp);
+        w->set_h = HIWORD(lp);
         ghostty_surface_set_size(w->surface, LOWORD(lp), HIWORD(lp));
+      }
       return 0;
     case WM_SETFOCUS:
       ghostty_surface_set_focus(w->surface, true);
