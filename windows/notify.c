@@ -700,6 +700,17 @@ void notify_progress(Window* w, ghostty_action_progress_report_s r) {
 
 void notify_frame_changed(Frame* f) { apply(f); }
 
+// A pane's own progress (OSC 9;4), for the bar drawn on it (paint.c):
+// false for none; *value -1 when it has no number (indeterminate, or an
+// error/pause without one).
+bool notify_pane_progress(Window* w, int* state, int* value) {
+  TabProgress* p = w ? progress_of(w) : NULL;
+  if (!p || p->state == GHOSTTY_PROGRESS_STATE_REMOVE) return false;
+  *state = (int)p->state;
+  *value = p->value;
+  return true;
+}
+
 void notify_tab_closed(Window* w) {
   if (g_toast_tab == w) g_toast_tab = NULL;
   TabProgress* p = progress_of(w);

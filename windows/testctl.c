@@ -14,7 +14,7 @@
 //
 // A request is one JSON line, the answer one JSON line, in order; a client
 // may send many. Commands (protocol 1, agreed with the e2e driver):
-//   hello, list, text, key, action, read, screenshot, stats, window, events, menu, ime, drop
+//   hello, list, text, key, action, read, screenshot, stats, window, events, menu, ime, drop, bell
 // They run on the UI thread (posted to the wakeup window, answered within
 // 5 s or "ui timeout"); a screenshot is then taken from the screen by the
 // pipe's thread, after a frame, so it shows what was presented in either
@@ -250,6 +250,20 @@ static Frame* target_frame(const JObj* o) {
   return front_frame();
 }
 
+// ,"progress":{"state":…,"value":…} of a pane, or null.
+static void put_progress(Line* b, Window* w) {
+  int state, value;
+  if (!w || !notify_pane_progress(w, &state, &value)) {
+    put(b, ",\"progress\":null");
+    return;
+  }
+  const char* name = state == GHOSTTY_PROGRESS_STATE_ERROR           ? "error"
+                     : state == GHOSTTY_PROGRESS_STATE_PAUSE         ? "paused"
+                     : state == GHOSTTY_PROGRESS_STATE_INDETERMINATE ? "indeterminate"
+                                                                     : "normal";
+  put(b, ",\"progress\":{\"state\":\"%s\",\"value\":%d}", name, value);
+}
+
 static void put_rect(Line* b, HWND h) {
   RECT r;
   GetWindowRect(h, &r);
@@ -319,6 +333,9 @@ static void cmd_list(Line* b) {
       Window* focused = f->tabs[i];
       put(b, "%s{\"selected\":%s,\"title\":", i ? "," : "", i == f->active ? "true" : "false");
       put_title(b, focused->title);
+      // The tab's marks as shown: the bell's (its focused pane's, as
+      // macOS) and the progress of its focused pane, else of any pane.
+      put(b, ",\"attention\":%s", focused->attention ? "true" : "false");
       put(b, ",\"zoomed\":%s,\"panes\":[",
           focused->tab && focused->tab->zoomed ? "true" : "false");
       Window* panes[64];
@@ -333,9 +350,16 @@ static void cmd_list(Line* b) {
         put(b, ",\"grid\":[%u,%u],\"present\":\"%s\",\"title\":", sz.columns, sz.rows,
             w->swap ? "swap" : w->dxgi ? "dxgi" : "copy");
         put_title(b, w->title);
+        put(b, ",\"attention\":%s", w->attention ? "true" : "false");
+        put_progress(b, w);
         put(b, "}");
       }
-      put(b, "]}");
+      put(b, "]");
+      Window* pp = pane_has_progress(focused) ? focused : NULL;
+      for (int k = 0; k < n && k < 64 && !pp; k++)
+        if (pane_has_progress(panes[k])) pp = panes[k];
+      put_progress(b, pp);
+      put(b, "}");
     }
     put(b, "]}");
   }
@@ -667,6 +691,10 @@ LRESULT testctl_ui(LPARAM lp) {
       ime_drive(w, comp, commit ? (strcmp(commit, "cancel") == 0 ? 0 : 1) : -1, b);
       free(comp);
       free(commit);
+    } else if (strcmp(cmd, "bell") == 0) {
+      // {"cmd":"bell","pane":N}: the host's side of a BEL from that pane,
+      // as the core's ring_bell action (Wine's console never passes one).
+      bell_rang(w->frame, w);
     } else if (strcmp(cmd, "screenshot") == 0) {
       char* t = jstr(&o, "target");
       HWND h = w->hwnd;

@@ -372,19 +372,23 @@ static bool chain_ready(Window* w, UINT width, UINT height) {
 // The stats overlay (Ctrl+Shift+I) on the back buffer, through a GDI DC of
 // it (the swap chain is GDI-compatible): the same drawing as the GDI path.
 static void overlay(Window* w, ID3D11Texture2D* back, UINT width, UINT height) {
-  if (!w->frame || !w->frame->stats) return;
+  bool stats = w->frame && w->frame->stats;
+  if (!stats && !pane_has_progress(w)) return;
   IDXGISurface1* s = NULL;
   if (ID3D11Texture2D_QueryInterface(back, &IID_IDXGISurface1, (void**)&s) != S_OK) return;
   HDC dc = NULL;
   if (IDXGISurface1_GetDC(s, FALSE, &dc) == S_OK) {
-    RECT rc = {0, 0, (LONG)width, (LONG)height}, box;
-    WCHAR* text = stats_layout(w, dc, rc, &box);
-    if (text) {
-      present_stats(w, dc, box, text);
-      free(text);
+    progress_draw(w, dc, (int)width);
+    if (stats) {
+      RECT rc = {0, 0, (LONG)width, (LONG)height}, box;
+      WCHAR* text = stats_layout(w, dc, rc, &box);
+      if (text) {
+        present_stats(w, dc, box, text);
+        free(text);
+      }
+      w->overlay_frames++;
     }
     IDXGISurface1_ReleaseDC(s, NULL);
-    w->overlay_frames++;
   }
   IDXGISurface1_Release(s);
 }
@@ -396,7 +400,8 @@ static void overlay(Window* w, ID3D11Texture2D* back, UINT width, UINT height) {
 // went out without it (lane B's demo, run 45304911856, the speed scene).
 // NULL: no overlay (stats off) or no DIB; the caller uploads `bgra` as is.
 static const uint8_t* with_overlay(Window* w, const uint8_t* bgra, UINT width, UINT height) {
-  if (!w->frame || !w->frame->stats || !bgra) return NULL;
+  bool stats = w->frame && w->frame->stats;
+  if (!bgra || (!stats && !pane_has_progress(w))) return NULL;
   if (!w->ov_dc || w->ov_w != width || w->ov_h != height) {
     if (w->ov_dc) DeleteDC(w->ov_dc);
     if (w->ov_bmp) DeleteObject(w->ov_bmp);
@@ -425,14 +430,17 @@ static const uint8_t* with_overlay(Window* w, const uint8_t* bgra, UINT width, U
     w->ov_h = height;
   }
   memcpy(w->ov_bits, bgra, (size_t)width * height * 4);
-  RECT rc = {0, 0, (LONG)width, (LONG)height}, box;
-  WCHAR* text = stats_layout(w, w->ov_dc, rc, &box);
-  if (text) {
-    present_stats(w, w->ov_dc, box, text);
-    free(text);
+  progress_draw(w, w->ov_dc, (int)width);  // the progress bar (paint.c)
+  if (stats) {
+    RECT rc = {0, 0, (LONG)width, (LONG)height}, box;
+    WCHAR* text = stats_layout(w, w->ov_dc, rc, &box);
+    if (text) {
+      present_stats(w, w->ov_dc, box, text);
+      free(text);
+    }
+    w->overlay_frames++;
   }
   GdiFlush();
-  w->overlay_frames++;
   return w->ov_bits;
 }
 
@@ -440,7 +448,9 @@ static const uint8_t* with_overlay(Window* w, const uint8_t* bgra, UINT width, U
 // the last frame goes out again with it (a flip-discard back buffer holds
 // nothing after a present): the kept pixels, or the last shared texture.
 void dxgi_repaint(Window* w) {
-  if (!w->dxgi || !w->dxgi_chain || !w->frame || !w->frame->stats) return;
+  if (!w->dxgi || !w->dxgi_chain || !w->frame) return;
+  if (!w->frame->stats && !pane_has_progress(w) && !w->repaint_once) return;
+  w->repaint_once = false;
   ID3D11Texture2D* back = NULL;
   if (IDXGISwapChain1_GetBuffer((IDXGISwapChain1*)w->dxgi_chain, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK)
     return;

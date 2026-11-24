@@ -150,6 +150,20 @@ static Window* target_window(ghostty_target_s t) {
   return ghostty_surface_userdata(t.target.surface);
 }
 
+// The bell (BEL): the window flashes, a beep, and the tab's 🔔 until
+// looked at (tabs.c). Also the test pipe's "bell" (Wine's console keeps
+// BEL to itself, so a Wine test cannot ring it from a program).
+void bell_rang(Frame* f, Window* w) {
+  if (f) FlashWindow(f->hwnd, TRUE);
+  MessageBeep(MB_OK);
+  attention_set(w, true);
+  if (w) {
+    char e[64];
+    snprintf(e, sizeof(e), "{\"kind\":\"bell\",\"pane\":%d}", w->id);
+    test_event(e);
+  }
+}
+
 bool action_cb(ghostty_app_t app, ghostty_target_s target,
                       ghostty_action_s action) {
   (void)app;
@@ -318,17 +332,20 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
       return true;
 
     case GHOSTTY_ACTION_RING_BELL:
-      if (f) FlashWindow(f->hwnd, TRUE);
-      MessageBeep(MB_OK);
+      bell_rang(f, w);
       return true;
 
     case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
       notify_toast(w, action.action.desktop_notification.title,
                    action.action.desktop_notification.body);
+      // Not looked at (another tab, a split without the focus, another
+      // window in front): its tab gets the mark too.
+      if (w && f && !(GetFocus() == w->hwnd && GetForegroundWindow() == f->hwnd)) attention_set(w, true);
       return true;
 
     case GHOSTTY_ACTION_PROGRESS_REPORT:
       notify_progress(w, action.action.progress_report);
+      progress_changed(w);  // the bar on the pane (paint.c)
       return true;
 
     case GHOSTTY_ACTION_CLOSE_WINDOW:

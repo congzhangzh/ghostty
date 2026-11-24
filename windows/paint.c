@@ -108,6 +108,95 @@ void take_frame(Window* w) {
   ghostty_frame_free(&f);
 }
 
+// ---- the progress bar on a pane (macOS's SurfaceProgressBar) -------------------
+//
+// OSC 9;4 progress, 2 points high along the pane's top, over the terminal:
+// the accent color (Windows'), red on an error, orange paused; its share of
+// the width when there is a number (paused without one: full), else a
+// quarter that bounces end to end (a timer while one does).
+
+#define PROGRESS_TIMER 33
+#define PROGRESS_TICK 50  // ms
+
+static COLORREF accent_color(void) {
+  DWORD c = 0;
+  BOOL opaque;
+  if (DwmGetColorizationColor(&c, &opaque) == S_OK && c) return RGB((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+  return RGB(0, 120, 215);
+}
+
+bool pane_has_progress(Window* w) {
+  int state, value;
+  return notify_pane_progress(w, &state, &value);
+}
+
+bool progress_draw(Window* w, HDC dc, int width) {
+  int state, value;
+  if (!notify_pane_progress(w, &state, &value) || width <= 0) return false;
+  int h = (int)(2 * w->scale + 0.5);
+  if (h < 2) h = 2;
+  COLORREF color = state == GHOSTTY_PROGRESS_STATE_ERROR   ? RGB(232, 17, 35)
+                   : state == GHOSTTY_PROGRESS_STATE_PAUSE ? RGB(255, 140, 0)
+                                                           : accent_color();
+  if (value < 0 && state == GHOSTTY_PROGRESS_STATE_PAUSE) value = 100;
+  RECT r = {0, 0, 0, h};
+  if (value >= 0) {
+    r.right = width * (value > 100 ? 100 : value) / 100;
+  } else {  // bouncing: a quarter of the width, end to end and back, 2 s a round
+    int seg = width / 4, span = width - seg;
+    double t = (double)(GetTickCount64() % 2000) / 1000.0;  // 0..2
+    double at = t < 1 ? t : 2 - t;
+    r.left = (int)(span * at);
+    r.right = r.left + seg;
+  }
+  HBRUSH b = CreateSolidBrush(color);
+  FillRect(dc, &r, b);
+  DeleteObject(b);
+  return true;
+}
+
+static bool bouncing(Window* w) {
+  int state, value;
+  return notify_pane_progress(w, &state, &value) && value < 0 && state != GHOSTTY_PROGRESS_STATE_PAUSE;
+}
+
+// A pane's progress changed: draw it again (no new frame may come), and
+// run the bounce's timer while any pane of its window bounces.
+void progress_changed(Window* w) {
+  if (!w || !w->hwnd || !w->frame) return;
+  w->repaint_once = true;  // a bar that went must go from the screen too
+  InvalidateRect(w->hwnd, NULL, FALSE);
+  Frame* f = w->frame;
+  bool any = false;
+  for (int i = 0; i < f->ntabs && !any; i++) {
+    Window* panes[64];
+    int n = tab_panes(f->tabs[i]->tab, panes, 64);
+    if (n <= 0) panes[0] = f->tabs[i], n = 1;
+    for (int k = 0; k < n && k < 64; k++) any = any || bouncing(panes[k]);
+  }
+  if (any)
+    SetTimer(f->hwnd, PROGRESS_TIMER, PROGRESS_TICK, NULL);
+  else
+    KillTimer(f->hwnd, PROGRESS_TIMER);
+}
+
+bool progress_timer(Frame* f, WPARAM id) {
+  if (id != PROGRESS_TIMER) return false;
+  bool any = false;
+  for (int i = 0; i < f->ntabs; i++) {
+    Window* panes[64];
+    int n = tab_panes(f->tabs[i]->tab, panes, 64);
+    if (n <= 0) panes[0] = f->tabs[i], n = 1;
+    for (int k = 0; k < n && k < 64; k++)
+      if (bouncing(panes[k])) {
+        any = true;
+        if (IsWindowVisible(panes[k]->hwnd)) InvalidateRect(panes[k]->hwnd, NULL, FALSE);
+      }
+  }
+  if (!any) KillTimer(f->hwnd, PROGRESS_TIMER);
+  return true;
+}
+
 void paint(Window* w) {
   PAINTSTRUCT ps;
   HDC dc = BeginPaint(w->hwnd, &ps);
@@ -172,6 +261,7 @@ void paint(Window* w) {
     DeleteObject(bg);
   }
   RestoreDC(dc, saved);
+  progress_draw(w, dc, rc.right);  // over the frame, under the stats box
   if (stats) {
     present_stats(w, dc, box, stats);
     free(stats);

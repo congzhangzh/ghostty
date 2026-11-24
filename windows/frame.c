@@ -385,7 +385,7 @@ LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       quick_activate(f, wp, lp);  // autohide (quick.c)
       break;
     case WM_TIMER:
-      if (theme_timer(f, wp) || quick_timer(f, wp) || reveal_timer(f, wp)) return 0;
+      if (theme_timer(f, wp) || quick_timer(f, wp) || reveal_timer(f, wp) || progress_timer(f, wp)) return 0;
       break;
     case WM_SETTINGCHANGE:
       // Windows' light/dark app mode changed: light:/dark: themes follow.

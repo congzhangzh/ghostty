@@ -1,5 +1,7 @@
 #include "host.h"
 
+static WCHAR* marked_title(Window* w, const WCHAR* title);  // the bell's mark, below
+
 // ---------------------------------------------------------------------------
 // The tab bar
 //
@@ -216,9 +218,11 @@ void draw_bar(Frame* f, HDC dc, int width, int b) {
     text.left += inset;
     text.right -= inset;
     SetTextColor(dc, sel ? g_fg : dim);
-    DrawTextW(dc, t->title ? t->title : L"Ghostty", -1, &text,
+    WCHAR* marked = marked_title(t, t->title ? t->title : L"Ghostty");
+    DrawTextW(dc, marked ? marked : t->title ? t->title : L"Ghostty", -1, &text,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
                   DT_NOPREFIX);
+    free(marked);
 
     if (over) {
       if (f->hover_close)
@@ -418,6 +422,35 @@ static void show_tab(Window* any, bool show) {
 
 // A pane got the keyboard: it is its tab's focused pane now (the tab's
 // title, the window's title, the bar follow it).
+// The bell's mark (macOS: "🔔 " before the title of the tab whose focused
+// pane rang, until it gets the focus or a key; bell-features' "title").
+// A desktop notification for a pane not looked at marks it too (the
+// owner's ask: which agent's tab finished, at a glance; macOS shows only
+// the system's notification).
+void attention_set(Window* w, bool on) {
+  if (!w || w->attention == on) return;
+  w->attention = on;
+  Frame* f = w->frame;
+  if (f) {
+    int i = tab_index(f, w);
+    if (i >= 0 && i == f->active) update_title(f);
+    invalidate_bar(f);
+    if (f->reveal) InvalidateRect(f->reveal, NULL, FALSE);
+  }
+  char e[96];
+  snprintf(e, sizeof(e), "{\"kind\":\"attention\",\"pane\":%d,\"on\":%s}", w->id, on ? "true" : "false");
+  test_event(e);
+}
+
+// A title with the bell's mark when w has it; free the result.
+static WCHAR* marked_title(Window* w, const WCHAR* title) {
+  if (!w || !w->attention || !title) return NULL;
+  size_t n = wcslen(title) + 4;
+  WCHAR* t = malloc(n * sizeof(WCHAR));
+  if (t) swprintf(t, n, L"\xD83D\xDD14 %ls", title);  // U+1F514 BELL
+  return t;
+}
+
 void pane_focused(Window* w) {
   Frame* f = w->frame;
   int i = tab_index(f, w);
@@ -434,18 +467,21 @@ void pane_focused(Window* w) {
 void update_title(Frame* f) {
   static const WCHAR app[] = L"Ghostty " WIDEN(GHOSTTY_BUILD_TAG);
   Window* w = f->active >= 0 ? f->tabs[f->active] : NULL;
-  const WCHAR* title = w && w->title && *w->title ? w->title : NULL;
+  WCHAR* marked = w && w->title && *w->title ? marked_title(w, w->title) : NULL;
+  const WCHAR* title = marked ? marked : w && w->title && *w->title ? w->title : NULL;
   const WCHAR* hint = titlebar_active(f) ? NULL : theme_hint();
   size_t n = (title ? wcslen(title) : 0) + (hint ? wcslen(hint) : 0) + wcslen(app) + 8;
   WCHAR* t = malloc(n * sizeof(WCHAR));
   if (!t) {
     SetWindowTextW(f->hwnd, title ? title : app);
+    free(marked);
     return;
   }
   swprintf(t, n, L"%ls%ls%ls%ls%ls", hint ? hint : L"", hint ? L" \u2014 " : L"",
            title ? title : L"", title ? L" \u2014 " : L"", app);
   SetWindowTextW(f->hwnd, t);
   free(t);
+  free(marked);
 }
 
 // Size every tab to the client area under the tab bar. The hidden ones
@@ -964,6 +1000,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
+      attention_set(w, false);  // a key: seen (macOS)
       // Let Windows have Alt+F4 and Alt+Space (the window menu); for a
       // child window DefWindowProc hands them to the top-level window.
       if (msg == WM_SYSKEYDOWN && (wp == VK_F4 || wp == VK_SPACE)) break;
@@ -1078,6 +1115,7 @@ LRESULT CALLBACK terminal_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_SETFOCUS:
       ghostty_surface_set_focus(w->surface, true);
+      attention_set(w, false);  // looked at (macOS: the focus clears the bell)
       pane_focused(w);
       return 0;
     case WM_KILLFOCUS:

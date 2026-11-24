@@ -164,6 +164,8 @@ struct Window {
   uint32_t set_w, set_h;
   bool shown;
   int dropped;
+  bool repaint_once;  // present the last frame again once (an overlay went: dxgi.c)
+  bool attention;  // the bell rang, or a notification came while not looked at (tabs.c)
   uint64_t overlay_frames;  // frames the stats overlay was drawn on (DXGI path)
   HDC ov_dc;                // the readback DXGI path's overlay: a DIB of the frame (dxgi.c)
   HBITMAP ov_bmp;
@@ -350,7 +352,16 @@ int scheme_mode(void);
 void scheme_cycle(void);
 void quick_toggle(void);
 void palette_toggle(Window* w);
-void sheet_toggle(Window* w);  // the cheat sheet (sheet.c); NULL closes it
+void sheet_toggle(Window* w);
+// The bell's mark on a tab (as macOS's "🔔 " title), and the progress bar
+// on a pane (as macOS's SurfaceProgressBar): tabs.c, paint.c.
+void attention_set(Window* w, bool on);
+void bell_rang(Frame* f, Window* w);  // callbacks.c
+bool notify_pane_progress(Window* w, int* state, int* value);
+bool progress_draw(Window* w, HDC dc, int width);  // false: none to draw
+bool pane_has_progress(Window* w);
+void progress_changed(Window* w);
+bool progress_timer(Frame* f, WPARAM id);  // the cheat sheet (sheet.c); NULL closes it
 bool help_rect(Frame* f, RECT* r);
 bool exitfs_rect(Frame* f, RECT* r);
 void draw_bar(Frame* f, HDC dc, int width, int b);
