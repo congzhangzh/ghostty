@@ -31,6 +31,8 @@
 
 static Frame* g_quick;
 static bool g_hotkey;
+static ULONGLONG g_taken_at;  // when the key was first found taken (0: not taken)
+static int g_retries;
 
 // ---- config --------------------------------------------------------------------
 
@@ -375,7 +377,14 @@ void quick_hotkey_update(void) {
   DWORD err = g_hotkey ? 0 : GetLastError();
   Holder h = g_hotkey ? HOLDER_OTHER : hotkey_holder();
   hotkey_event(vk, mods, g_hotkey, err, h, false);
-  if (g_hotkey) return;
+  if (g_hotkey) {
+    if (g_taken_at)  // a config change found it free again
+      fprintf(stderr, "ghostty: Quick Terminal key acquired after %llu s\n", (GetTickCount64() - g_taken_at) / 1000);
+    g_taken_at = 0;
+    return;
+  }
+  if (!g_taken_at) g_taken_at = GetTickCount64();
+  g_retries = 0;
   WCHAR name[64];
   key_name(vk, mods, name, 64);
   fprintf(stderr, "ghostty: the quick terminal's global key %ls is taken (error %lu, holder %s); trying again\n",
@@ -402,10 +411,18 @@ bool quick_retry(WPARAM id) {
   }
   UINT vk = 0, mods = 0;
   g_hotkey = hotkey_register(&vk, &mods);
+  DWORD err = g_hotkey ? 0 : GetLastError();
   if (!vk || g_hotkey) KillTimer(g_wakeup_hwnd, QUICK_RETRY_TIMER);
+  ULONGLONG secs = g_taken_at ? (GetTickCount64() - g_taken_at) / 1000 : 0;
+  g_retries++;
   if (g_hotkey) {
     hotkey_event(vk, mods, true, 0, HOLDER_OTHER, true);
-    fprintf(stderr, "ghostty: the quick terminal's global key is free again: registered\n");
+    fprintf(stderr, "ghostty: Quick Terminal key acquired after %llu s (retry %d)\n", secs, g_retries);
+    g_taken_at = 0;
+  } else if (vk && (g_retries <= 12 || g_retries % 12 == 0)) {
+    // Each try for the first minute, then once a minute.
+    fprintf(stderr, "ghostty: Quick Terminal key retry %d after %llu s: error %lu, holder %s\n", g_retries, secs, err,
+            holder_name(hotkey_holder()));
   }
   return true;
 }
