@@ -18778,6 +18778,56 @@ test "Terminal: resize prompt redraw clears prompts that reflow splits or joins"
     }
 }
 
+test "Terminal: resize keeps a prompt marked redraw=0 (cmd, PowerShell)" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+
+    // cmd's prompt as Ghostty for Windows' shell integration writes it
+    // (termio/shell_integration.zig setupCmd, without its OSC 7), a
+    // command typed, not run.
+    // Neither cmd nor PowerShell redraws its prompt on a resize (Windows
+    // has no SIGWINCH), so the prompt says redraw=0 and a resize (a split,
+    // a zoom, full screen) must keep the row. Without redraw=0 the core
+    // clears it and the row stays blank (the cursor stays where it was).
+    const cmd = "out\r\n" ++
+        "\x1b]133;A;redraw=0\x1b\\" ++ "C:\\>" ++ "\x1b]133;B\x1b\\" ++ "echo hi";
+    const unmarked = "out\r\n" ++
+        "\x1b]133;A\x1b\\" ++ "C:\\>" ++ "\x1b]133;B\x1b\\" ++ "echo hi";
+
+    const cases = [_]struct {
+        input: []const u8,
+        cols: size.CellCountInt,
+        rows: size.CellCountInt,
+        text: []const u8,
+    }{
+        // A split down or a zoom: the rows change.
+        .{ .input = cmd, .cols = 30, .rows = 3, .text = "out\nC:\\>echo hi" },
+        .{ .input = cmd, .cols = 30, .rows = 12, .text = "out\nC:\\>echo hi" },
+        // A split right: the columns change.
+        .{ .input = cmd, .cols = 15, .rows = 6, .text = "out\nC:\\>echo hi" },
+        // The core's default (the shell redraws): cleared.
+        .{ .input = unmarked, .cols = 30, .rows = 3, .text = "out" },
+    };
+
+    for (cases) |case| {
+        var t = try init(io_impl, alloc, .{ .cols = 30, .rows = 6 });
+        defer t.deinit(alloc);
+        {
+            var s = t.vtStream();
+            defer s.deinit();
+            s.nextSlice(case.input);
+        }
+
+        try t.resize(alloc, .{ .cols = case.cols, .rows = case.rows });
+
+        const str = try t.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} });
+        defer alloc.free(str);
+        try testing.expectEqualStrings(case.text, str);
+        try testing.expectEqual(@as(size.CellCountInt, 1), t.screens.active.cursor.y);
+        try testing.expectEqual(@as(size.CellCountInt, 11), t.screens.active.cursor.x);
+    }
+}
+
 test "Terminal: resize prompt redraw keeps the previous prompt when reflow joins rows" {
     const alloc = testing.allocator;
     const io_impl = testing.io;

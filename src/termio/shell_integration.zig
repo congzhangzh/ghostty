@@ -102,7 +102,7 @@ test "cmd: the prompt between marks, with the folder" {
     defer env.deinit();
     _ = (try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env)).?;
     try testing.expectEqualStrings(
-        "$E]133;A$E\\$E]7;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
+        "$E]133;A;redraw=0$E\\$E]7;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
         env.get("PROMPT").?,
     );
     // Once only, and around the user's own prompt.
@@ -688,6 +688,9 @@ test "bash: missing resources" {
 /// cmd.exe: its prompt (the PROMPT variable, or cmd's default $P$G) between
 /// OSC 133 marks, with OSC 7 for the folder ($P, as is: kitty-shell-cwd
 /// takes a raw path). $E is ESC in a cmd prompt. The command is unchanged.
+/// `redraw=0`: cmd never redraws its prompt on a resize (Windows has no
+/// SIGWINCH), so the core must not clear the prompt and the typed command
+/// on a resize (a split, a zoom, full screen), or that row stays blank.
 fn setupCmd(
     alloc: Allocator,
     command: config.Command,
@@ -697,7 +700,7 @@ fn setupCmd(
     if (std.mem.indexOf(u8, user, "]133;") != null) return try command.clone(alloc); // already
     const prompt = try std.fmt.allocPrint(
         alloc,
-        "$E]133;A$E\\$E]7;kitty-shell-cwd://localhost/$P$E\\{s}$E]133;B$E\\",
+        "$E]133;A;redraw=0$E\\$E]7;kitty-shell-cwd://localhost/$P$E\\{s}$E]133;B$E\\",
         .{user},
     );
     try env.put("PROMPT", prompt);

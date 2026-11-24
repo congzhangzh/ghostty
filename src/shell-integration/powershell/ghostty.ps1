@@ -10,7 +10,8 @@
 # it falls back to your own prompt. It wraps your prompt function, whatever
 # made it (your profile, oh-my-posh, starship), adding:
 #   - OSC 133 marks around the prompt: jump between prompts
-#     (jump_to_prompt), select a command's output;
+#     (jump_to_prompt), select a command's output; redraw=0, so a resize
+#     keeps the prompt and the command being typed;
 #   - OSC 7 with the current folder: new tabs and splits start there (also
 #     in \\wsl.localhost\<distro> folders).
 
@@ -34,7 +35,9 @@ function global:prompt {
         $s = ''
         if ($global:__GhosttyRan) { $s += "$e]133;D;$code$e\" }
         $global:__GhosttyRan = $true
-        $s += "$e]133;A$e\"
+        # redraw=0: PowerShell does not redraw its prompt on a resize (Windows
+        # has no SIGWINCH), so Ghostty must not clear it (a split, a zoom).
+        $s += "$e]133;A;redraw=0$e\"
         $loc = $ExecutionContext.SessionState.Path.CurrentLocation
         if ($loc.Provider.Name -eq 'FileSystem') {
             # kitty-shell-cwd takes the path as it is: C:\dir, \\server\share.
