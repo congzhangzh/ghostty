@@ -35,60 +35,6 @@ const log = std.log.scoped(.io_exec);
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 
-/// Windows: how often the shell's process handle is looked at, beside the
-/// job object's exit message (see exitPoll).
-const EXIT_POLL_MS = 500;
-
-/// Windows: the exits the exit poll caught because the job object's message
-/// never came (see exitPoll). It is a safety net, not the fix: every catch
-/// means the process watcher missed an exit, so it is never quiet. Each one
-/// is logged as a warning, and the host puts the count in its stats line
-/// ("exit_poll_catches"), so a test run can flag it.
-var exit_poll_catches: std.atomic.Value(u64) = .init(0);
-
-fn exitPollCatches() callconv(.c) u64 {
-    return exit_poll_catches.load(.monotonic);
-}
-
-comptime {
-    if (builtin.target.os.tag == .windows)
-        @export(&exitPollCatches, .{ .name = "ghostty_windows_exit_poll_catches" });
-}
-
-/// Windows: what the exit poll logs about the shell's job object when it
-/// catches an exit, to find why its message never came.
-const job_api = if (builtin.target.os.tag == .windows) struct {
-    const JobObjectBasicAccountingInformation: c_int = 1;
-    const JobObjectBasicProcessIdList: c_int = 3;
-    const Accounting = extern struct {
-        TotalUserTime: i64,
-        TotalKernelTime: i64,
-        ThisPeriodTotalUserTime: i64,
-        ThisPeriodTotalKernelTime: i64,
-        TotalPageFaultCount: u32,
-        TotalProcesses: u32,
-        ActiveProcesses: u32,
-        TotalTerminatedProcesses: u32,
-    };
-    const ProcessIds = extern struct {
-        NumberOfAssignedProcesses: u32,
-        NumberOfProcessIdsInList: u32,
-        ProcessIdList: [16]usize,
-    };
-    extern "kernel32" fn QueryInformationJobObject(
-        hJob: ?windows.HANDLE,
-        class: c_int,
-        info: *anyopaque,
-        len: windows.DWORD,
-        ret_len: ?*windows.DWORD,
-    ) callconv(.winapi) windows.BOOL;
-    extern "kernel32" fn IsProcessInJob(
-        process: windows.HANDLE,
-        job: ?windows.HANDLE,
-        result: *windows.BOOL,
-    ) callconv(.winapi) windows.BOOL;
-} else struct {};
-
 /// If we build with flatpak support then we have to keep track of
 /// a potential execution on the host.
 const FlatpakHostCommand = if (!build_config.flatpak) struct {
@@ -190,10 +136,6 @@ pub fn threadEnter(
     var termios_timer = try xev.Timer.init();
     errdefer termios_timer.deinit();
 
-    // Windows: the exit poll's timer (see exitPoll).
-    var exit_poll_timer = try xev.Timer.init();
-    errdefer exit_poll_timer.deinit();
-
     // Start our read thread
     const read_thread = try std.Thread.spawn(
         .{},
@@ -211,13 +153,6 @@ pub fn threadEnter(
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
         .termios_timer = termios_timer,
-        .exit_poll_timer = exit_poll_timer,
-        .exit_poll_process = if (comptime builtin.target.os.tag == .windows)
-            switch (self.subprocess.process.?) {
-                .fork_exec => |cmd| cmd.pid,
-                .flatpak => null,
-            }
-        else {},
     } };
 
     // Start our process watcher. If we have an xev.Process use it.
@@ -241,19 +176,6 @@ pub fn threadEnter(
 
             .fork_exec => {},
         }
-    }
-
-    // Windows: look at the shell's process handle now and then, beside the
-    // job object's exit message (see exitPoll).
-    if (comptime builtin.target.os.tag == .windows) {
-        if (td.backend.exec.exit_poll_process != null) exit_poll_timer.run(
-            td.loop,
-            &td.backend.exec.exit_poll_c,
-            EXIT_POLL_MS,
-            termio.Termio.ThreadData,
-            td,
-            exitPoll,
-        );
     }
 
     // Start our termios timer. We don't support this on Windows.
@@ -363,8 +285,6 @@ pub fn resize(
 fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     assert(td.backend == .exec);
     const execdata = &td.backend.exec;
-    // Once: on Windows both the process watcher and the exit poll can see it.
-    if (execdata.exited) return;
     execdata.exited = true;
 
     // Determine how long the process was running for.
@@ -392,87 +312,6 @@ fn processExit(
 ) xev.CallbackAction {
     const exit_code = r catch unreachable;
     processExitCommon(td_.?, exit_code);
-    return .disarm;
-}
-
-/// Windows: the process watcher (xev.Process) learns of the shell's exit
-/// from a job object's message on the IO completion port, and Windows does
-/// not guarantee those (JOBOBJECT_ASSOCIATE_COMPLETION_PORT: the messages
-/// "are intended only as notifications and their delivery to the completion
-/// port is not guaranteed"). On a machine with a real GPU, a Ghostty whose
-/// shell had ended stayed open in 5 of 14 runs (2026-11-25): the
-/// shell was gone, only OpenConsole was left, the host's wakeups were fine,
-/// and a forced wakeup did not close it, so the exit never reached this
-/// thread. So the process handle, which is signaled when the shell ends, is
-/// also looked at every EXIT_POLL_MS.
-fn exitPoll(
-    td_: ?*termio.Termio.ThreadData,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    _ = r catch return .disarm; // canceled: the thread is ending
-    if (comptime builtin.target.os.tag != .windows) return .disarm;
-    const td = td_.?;
-    assert(td.backend == .exec);
-    const exec = &td.backend.exec;
-    if (exec.exited) return .disarm;
-    const h = exec.exit_poll_process orelse return .disarm;
-    if (windows.exp.kernel32.WaitForSingleObject(h, 0) != 0) { // not WAIT_OBJECT_0: still running
-        exec.exit_poll_timer.run(
-            td.loop,
-            &exec.exit_poll_c,
-            EXIT_POLL_MS,
-            termio.Termio.ThreadData,
-            td,
-            exitPoll,
-        );
-        return .disarm;
-    }
-    var code: windows.DWORD = 0;
-    if (windows.exp.kernel32.GetExitCodeProcess(h, &code) == windows.FALSE) code = 0;
-    const catches = exit_poll_catches.fetchAdd(1, .monotonic) + 1;
-
-    // The job's own view: did it see the exit, what is left in it, and is
-    // Ghostty itself in a job (a scheduled task's, say)?
-    const job: ?windows.HANDLE = if (exec.process) |p| p.job else null;
-    var acct = std.mem.zeroes(job_api.Accounting);
-    const have_acct = job != null and job_api.QueryInformationJobObject(
-        job,
-        job_api.JobObjectBasicAccountingInformation,
-        &acct,
-        @sizeOf(job_api.Accounting),
-        null,
-    ) != windows.FALSE;
-    var ids = std.mem.zeroes(job_api.ProcessIds);
-    const have_ids = job != null and job_api.QueryInformationJobObject(
-        job,
-        job_api.JobObjectBasicProcessIdList,
-        &ids,
-        @sizeOf(job_api.ProcessIds),
-        null,
-    ) != windows.FALSE;
-    var in_job: windows.BOOL = windows.FALSE;
-    const have_in_job = job_api.IsProcessInJob(std.os.windows.GetCurrentProcess(), null, &in_job) != windows.FALSE;
-    log.warn(
-        "child process exit seen by the exit poll (the job object's message never came) " ++
-            "status={} catches={} job: read={} processes total={} active={} terminated={}, " ++
-            "ids read={} assigned={} {any}, ghostty in a job: read={} {}",
-        .{
-            code,
-            catches,
-            have_acct,
-            acct.TotalProcesses,
-            acct.ActiveProcesses,
-            acct.TotalTerminatedProcesses,
-            have_ids,
-            ids.NumberOfAssignedProcesses,
-            ids.ProcessIdList[0..@min(ids.NumberOfProcessIdsInList, ids.ProcessIdList.len)],
-            have_in_job,
-            in_job != windows.FALSE,
-        },
-    );
-    processExitCommon(td, code);
     return .disarm;
 }
 
@@ -714,12 +553,6 @@ pub const ThreadData = struct {
     termios_timer_c: xev.Completion = .{},
     termios_timer_running: bool = true,
 
-    /// Windows: the exit poll (see exitPoll): its timer, and the shell's
-    /// process handle (the Command's own; null for flatpak).
-    exit_poll_timer: xev.Timer,
-    exit_poll_c: xev.Completion = .{},
-    exit_poll_process: if (builtin.target.os.tag == .windows) ?windows.HANDLE else void,
-
     /// The last known termios mode. Used for change detection
     /// to prevent unnecessary locking of expensive mutexes.
     termios_mode: ptypkg.Mode = .{},
@@ -740,7 +573,6 @@ pub const ThreadData = struct {
 
         // Stop our termios timer
         self.termios_timer.deinit();
-        self.exit_poll_timer.deinit();
     }
 };
 
