@@ -11,7 +11,7 @@
 // through a DXGI flip-model swap chain, and finding out whether GL can share
 // a texture with D3D11 (WGL_NV_DX_interop2).
 //
-// GHOSTTY_PRESENT (unset: dxgi, or interop when GL offers it; see present_mode_resolve):
+// GHOSTTY_PRESENT (unset: interop where available, else dxgi; see present_mode_resolve):
 //   interop  when the extension is there (step 3, OpenGL.zig dxPresent): GL
 //            blits each frame on the GPU into one of two D3D11 textures
 //            shared with the host, which copies it on the GPU into the back
@@ -128,9 +128,10 @@ static bool interop_forced(void) {
 void present_mode_resolve(void) {
   const char* v = getenv("GHOSTTY_PRESENT");
   if (!v || !*v) {
-    // The default (since 2026-11-23, again since 2026-11-25): the DXGI flip
-    // path, with interop when GL offers it; any failure falls back to GDI
-    // (said once). GHOSTTY_PRESENT=readback is the way back to GDI.
+    // The default (since 2026-11-23, again since 2026-11-25) is interop where
+    // it is available (GL offers WGL_NV_DX_interop2: frames stay on the GPU),
+    // else the DXGI flip path; any DXGI failure falls back to GDI (said once).
+    // GHOSTTY_PRESENT=dxgi|readback chooses another one.
     // Readback was the default from 2026-11-24 to 2026-11-25 after a .7
     // measurement on a real GPU (2026-11-24) that read "interop 2.0 fps".
     // That figure was WRONG: only the start-up stats line (still on
@@ -142,8 +143,16 @@ void present_mode_resolve(void) {
     uint64_t t0 = qpc();
     probe_gl();
     _putenv(g_gl.interop ? "GHOSTTY_PRESENT=interop" : "GHOSTTY_PRESENT=dxgi");
-    fprintf(stderr, "ghostty: present: default %s (probe %.1f ms%s%s)\n", g_gl.interop ? "interop" : "dxgi",
-            (double)(qpc() - t0) * g_qpc_ms, g_gl.why ? ": " : "", g_gl.why ? g_gl.why : "");
+    if (g_gl.interop)
+      fprintf(stderr,
+              "ghostty: present: interop (default where available; GHOSTTY_PRESENT=dxgi|readback to choose; "
+              "probe %.1f ms)\n",
+              (double)(qpc() - t0) * g_qpc_ms);
+    else
+      fprintf(stderr,
+              "ghostty: present: dxgi (default: interop unavailable: %s; GHOSTTY_PRESENT=readback to choose; "
+              "probe %.1f ms)\n",
+              g_gl.why ? g_gl.why : "unknown", (double)(qpc() - t0) * g_qpc_ms);
     v = getenv("GHOSTTY_PRESENT");
   }
   if (strcmp(v, "interop") != 0) return;
