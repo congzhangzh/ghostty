@@ -127,8 +127,10 @@ void stats_json(Line* b0) {
       (double)(g_stats_qpc - g_stats_start_qpc) * g_qpc_ms, g_period_ms,
       GetCurrentProcessId());
   put_string(&b, GHOSTTY_BUILD_TAG);
-  put(&b, ",\"cpu_pct\":%.1f,\"ws_mb\":%.1f,\"private_mb\":%.1f,\"gl\":",
-      g_cpu_pct, g_ws_mb, g_private_mb);
+  // exit_poll_catches: shell exits only the core's exit poll saw (termio/
+  // Exec.zig exitPoll); a safety net, so anything but 0 is a bug to find.
+  put(&b, ",\"cpu_pct\":%.1f,\"ws_mb\":%.1f,\"private_mb\":%.1f,\"exit_poll_catches\":%llu,\"gl\":",
+      g_cpu_pct, g_ws_mb, g_private_mb, (unsigned long long)ghostty_windows_exit_poll_catches());
   put_string(&b, gl_driver());
   present_stats_json(&b);  // the interop probe, the DXGI adapter (dxgi.c)
   put(&b, ",\"windows\":[");

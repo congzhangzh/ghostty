@@ -271,6 +271,7 @@ void dxgi_pane_gone(Window* w);
 bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height);
 void dxgi_repaint(Window* w);
 extern const char* ghostty_windows_gl_driver(void);  // pkg/opengl/wgl.zig
+extern uint64_t ghostty_windows_exit_poll_catches(void);  // src/termio/Exec.zig
 void drop_files(Window* w, HDROP drop);
 void mouse_pos(Window* w, LPARAM lp);
 void mouse_button(Window* w, ghostty_input_mouse_state_e state,
