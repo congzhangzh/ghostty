@@ -2142,6 +2142,13 @@ pub const Set = struct {
     /// integration with GUI toolkits.
     reverse: ReverseMap = .{},
 
+    /// As reverse, performable triggers included: the most recently added
+    /// leaf binding for each action, for key hints only (a command palette,
+    /// a cheat sheet), never for menu shortcuts. Kept in its own map so
+    /// the newest binding wins without relying on the bindings' order,
+    /// which a removal (swapRemove) changes. See getTriggerAny.
+    hint: ReverseMap = .{},
+
     /// The chain parent is the information necessary to attach a chained
     /// action to the proper location in our mapping. It tracks both the
     /// entry in the hashmap and the set it belongs to, which is needed
@@ -2354,6 +2361,7 @@ pub const Set = struct {
 
         self.bindings.deinit(alloc);
         self.reverse.deinit(alloc);
+        self.hint.deinit(alloc);
         self.* = undefined;
     }
 
@@ -2611,11 +2619,19 @@ pub const Set = struct {
 
             // If we have an existing binding for this trigger, we have to
             // update the reverse mapping to remove the old action.
-            .leaf => if (track_reverse) {
+            .leaf => {
                 const t_hash = t.hash();
-                for (0.., self.reverse.values()) |i, *value| {
+                if (track_reverse) {
+                    for (0.., self.reverse.values()) |i, *value| {
+                        if (t_hash == value.hash()) {
+                            self.reverse.swapRemoveAt(i);
+                            break;
+                        }
+                    }
+                }
+                for (0.., self.hint.values()) |i, *value| {
                     if (t_hash == value.hash()) {
-                        self.reverse.swapRemoveAt(i);
+                        self.hint.swapRemoveAt(i);
                         break;
                     }
                 }
@@ -2634,6 +2650,8 @@ pub const Set = struct {
         } };
         errdefer _ = self.bindings.swapRemove(t);
 
+        try self.hint.put(alloc, action, t);
+        errdefer _ = self.hint.swapRemove(action);
         if (track_reverse) try self.reverse.put(alloc, action, t);
         errdefer if (track_reverse) self.reverse.remove(action);
 
@@ -2698,6 +2716,10 @@ pub const Set = struct {
                     leaf.action,
                     parent.key_ptr.*,
                 );
+                parent.set.fixupHintForAction(
+                    leaf.action,
+                    parent.key_ptr.*,
+                );
             },
         }
     }
@@ -2714,28 +2736,15 @@ pub const Set = struct {
     }
 
     /// Get a trigger for the given action to show as a key hint (e.g. in
-    /// a command palette), performable bindings included. getTrigger
+    /// a command palette), performable bindings included: the most recently
+    /// added leaf binding for the action (the hint mapping). getTrigger
     /// leaves performable bindings out so toolkits don't register them as
     /// menu shortcuts; a hint has no such problem, and an action bound
     /// only with performable (e.g. goto_split by default) still has a key
-    /// to show. The reverse mapping's trigger wins; otherwise the most
-    /// recently added leaf binding for the action. Sequences and chained
-    /// actions are never returned, as with getTrigger.
+    /// to show. Sequences and chained actions are never returned, as with
+    /// getTrigger.
     pub fn getTriggerAny(self: Set, a: Action) ?Trigger {
-        if (self.reverse.get(a)) |t| return t;
-
-        const keys = self.bindings.keys();
-        const values = self.bindings.values();
-        var i: usize = keys.len;
-        while (i > 0) {
-            i -= 1;
-            switch (values[i]) {
-                .leader, .leaf_chained => {},
-                .leaf => |leaf| if (leaf.action.bindingSetEqual(a)) return keys[i],
-            }
-        }
-
-        return null;
+        return self.hint.get(a);
     }
 
     /// Get an entry for the given key event. This will attempt to find
@@ -2808,10 +2817,10 @@ pub const Set = struct {
             },
 
             // For an action we need to fix up the reverse mapping.
-            .leaf => |leaf| self.fixupReverseForAction(
-                leaf.action,
-                t,
-            ),
+            .leaf => |leaf| {
+                self.fixupReverseForAction(leaf.action, t);
+                self.fixupHintForAction(leaf.action, t);
+            },
 
             // Chained leaves are never in our reverse mapping so no
             // cleanup is required.
@@ -2869,11 +2878,41 @@ pub const Set = struct {
         _ = self.reverse.swapRemove(action);
     }
 
+    /// As fixupReverseForAction, for the hint mapping: when the hinted
+    /// trigger of an action goes, another leaf binding for the same action
+    /// (the last in the bindings' order) takes its place, else none.
+    fn fixupHintForAction(
+        self: *Set,
+        action: Action,
+        old: Trigger,
+    ) void {
+        const entry = self.hint.getEntry(action) orelse return;
+        if (!entry.value_ptr.equal(old)) return;
+
+        const action_hash = action.hash();
+        const keys = self.bindings.keys();
+        const values = self.bindings.values();
+        var i: usize = keys.len;
+        while (i > 0) {
+            i -= 1;
+            switch (values[i]) {
+                .leader, .leaf_chained => {},
+                .leaf => |leaf| if (leaf.action.hash() == action_hash) {
+                    entry.value_ptr.* = keys[i];
+                    return;
+                },
+            }
+        }
+
+        _ = self.hint.swapRemove(action);
+    }
+
     /// Deep clone the set.
     pub fn clone(self: *const Set, alloc: Allocator) !Set {
         var result: Set = .{
             .bindings = try self.bindings.clone(alloc),
             .reverse = try self.reverse.clone(alloc),
+            .hint = try self.hint.clone(alloc),
         };
 
         // If we have any leaders we need to clone them.
@@ -2900,6 +2939,9 @@ pub const Set = struct {
         // We need to clone the action keys in the reverse map since
         // they may contain allocated values.
         for (result.reverse.keys()) |*action| {
+            action.* = try action.clone(alloc);
+        }
+        for (result.hint.keys()) |*action| {
             action.* = try action.clone(alloc);
         }
 
@@ -4226,10 +4268,33 @@ test "set: getTriggerAny includes performable bindings" {
         try testing.expectEqual(key.Key.arrow_left, left.key.physical);
     }
 
-    // A non-performable binding (the reverse mapping) wins.
+    // Removing another binding moves entries in the bindings (swapRemove):
+    // the newest binding still wins.
+    s.remove(alloc, .{ .key = .{ .physical = .arrow_left }, .mods = .{ .ctrl = true, .alt = true } });
+    {
+        const trigger = s.getTriggerAny(.{ .goto_split = .right }).?;
+        try testing.expectEqual(@as(u21, 'l'), trigger.key.unicode);
+        try testing.expect(s.getTriggerAny(.{ .goto_split = .left }) == null);
+    }
+    try s.putFlags(
+        alloc,
+        .{ .key = .{ .physical = .arrow_left }, .mods = .{ .ctrl = true, .alt = true } },
+        .{ .goto_split = .left },
+        .{ .performable = true },
+    );
+
+    // The newest binding wins, performable or not.
     try s.put(alloc, .{ .key = .{ .unicode = 'r' } }, .{ .goto_split = .right });
     {
         const trigger = s.getTriggerAny(.{ .goto_split = .right }).?;
+        try testing.expectEqual(@as(u21, 'r'), trigger.key.unicode);
+    }
+
+    // A clone keeps the hints.
+    {
+        var c = try s.clone(alloc);
+        defer c.deinit(alloc);
+        const trigger = c.getTriggerAny(.{ .goto_split = .right }).?;
         try testing.expectEqual(@as(u21, 'r'), trigger.key.unicode);
     }
 

@@ -335,6 +335,16 @@ test "ghostty_config_trigger_any: performable goto_split, rebound" {
         try testing.expectEqual(.arrow_left, left.key.physical);
     }
 
+    // Unbinding another key moves entries in the bindings (swapRemove):
+    // the rebound key still shows (run under Wine: it showed the default).
+    if (comptime !builtin.target.os.tag.isDarwin()) {
+        try cfg.keybind.parseCLI(alloc, "ctrl+alt+arrow_left=unbind");
+        const any = try config_trigger_any_(&cfg, "goto_split:right");
+        try testing.expectEqual(@as(u32, 'l'), any.key.unicode);
+        const left = try config_trigger_any_(&cfg, "goto_split:left");
+        try testing.expectEqual(.unidentified, left.key.physical);
+    }
+
     // Unbound: no key left to show.
     try cfg.keybind.parseCLI(alloc, "ctrl+alt+l=unbind");
     try cfg.keybind.parseCLI(alloc, "ctrl+alt+arrow_right=unbind");
