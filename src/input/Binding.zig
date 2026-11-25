@@ -2713,6 +2713,31 @@ pub const Set = struct {
         return self.reverse.get(a);
     }
 
+    /// Get a trigger for the given action to show as a key hint (e.g. in
+    /// a command palette), performable bindings included. getTrigger
+    /// leaves performable bindings out so toolkits don't register them as
+    /// menu shortcuts; a hint has no such problem, and an action bound
+    /// only with performable (e.g. goto_split by default) still has a key
+    /// to show. The reverse mapping's trigger wins; otherwise the most
+    /// recently added leaf binding for the action. Sequences and chained
+    /// actions are never returned, as with getTrigger.
+    pub fn getTriggerAny(self: Set, a: Action) ?Trigger {
+        if (self.reverse.get(a)) |t| return t;
+
+        const keys = self.bindings.keys();
+        const values = self.bindings.values();
+        var i: usize = keys.len;
+        while (i > 0) {
+            i -= 1;
+            switch (values[i]) {
+                .leader, .leaf_chained => {},
+                .leaf => |leaf| if (leaf.action.bindingSetEqual(a)) return keys[i],
+            }
+        }
+
+        return null;
+    }
+
     /// Get an entry for the given key event. This will attempt to find
     /// a binding using multiple parts of the event in the following order:
     ///
@@ -4158,6 +4183,65 @@ test "set: performable is not part of reverse mappings" {
         const trigger = s.getTrigger(.{ .new_window = {} }).?;
         try testing.expect(trigger.key.unicode == 'a');
     }
+}
+
+test "set: getTriggerAny includes performable bindings" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    // Only performable: not in the reverse mapping, but found.
+    try s.putFlags(
+        alloc,
+        .{ .key = .{ .physical = .arrow_right }, .mods = .{ .ctrl = true, .alt = true } },
+        .{ .goto_split = .right },
+        .{ .performable = true },
+    );
+    try s.putFlags(
+        alloc,
+        .{ .key = .{ .physical = .arrow_left }, .mods = .{ .ctrl = true, .alt = true } },
+        .{ .goto_split = .left },
+        .{ .performable = true },
+    );
+    try testing.expect(s.getTrigger(.{ .goto_split = .right }) == null);
+    {
+        const trigger = s.getTriggerAny(.{ .goto_split = .right }).?;
+        try testing.expectEqual(key.Key.arrow_right, trigger.key.physical);
+    }
+
+    // A later performable binding for the same action wins, and only for
+    // that action's parameter.
+    try s.putFlags(
+        alloc,
+        .{ .key = .{ .unicode = 'l' }, .mods = .{ .ctrl = true, .alt = true } },
+        .{ .goto_split = .right },
+        .{ .performable = true },
+    );
+    {
+        const trigger = s.getTriggerAny(.{ .goto_split = .right }).?;
+        try testing.expectEqual(@as(u21, 'l'), trigger.key.unicode);
+        const left = s.getTriggerAny(.{ .goto_split = .left }).?;
+        try testing.expectEqual(key.Key.arrow_left, left.key.physical);
+    }
+
+    // A non-performable binding (the reverse mapping) wins.
+    try s.put(alloc, .{ .key = .{ .unicode = 'r' } }, .{ .goto_split = .right });
+    {
+        const trigger = s.getTriggerAny(.{ .goto_split = .right }).?;
+        try testing.expectEqual(@as(u21, 'r'), trigger.key.unicode);
+    }
+
+    // Removing the bindings removes the hint: no stale key.
+    s.remove(alloc, .{ .key = .{ .unicode = 'r' } });
+    s.remove(alloc, .{ .key = .{ .unicode = 'l' }, .mods = .{ .ctrl = true, .alt = true } });
+    s.remove(alloc, .{ .key = .{ .physical = .arrow_right }, .mods = .{ .ctrl = true, .alt = true } });
+    try testing.expect(s.getTriggerAny(.{ .goto_split = .right }) == null);
+
+    // A trigger rebound to another action no longer hints the old one.
+    try s.put(alloc, .{ .key = .{ .physical = .arrow_left }, .mods = .{ .ctrl = true, .alt = true } }, .{ .new_tab = {} });
+    try testing.expect(s.getTriggerAny(.{ .goto_split = .left }) == null);
 }
 
 test "set: overriding a mapping updates reverse" {

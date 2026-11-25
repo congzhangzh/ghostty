@@ -16,9 +16,10 @@
 // The "?" button and Ctrl+Shift+? open it; Esc, ?, a click (or another
 // window) close it. Ctrl+Shift+P stays the command palette.
 //
-// The keys are the config's own bindings (ghostty_config_trigger, so a
-// rebound key shows as rebound; an action with no key is left out), the
-// labels the palette's titles in the display language (i18n.c).
+// The keys are the config's own bindings (ghostty_config_trigger_any,
+// performable ones included, so a rebound key shows as rebound; an action
+// with no key is left out), the labels the palette's titles in the display
+// language (i18n.c).
 
 typedef struct {
   const char* action;  // its key from the config, if it has one
@@ -38,17 +39,16 @@ typedef struct {
 // is Close Tab), Equalize Splits (a macOS key only).
 //
 // The keys of actions the lookup can't give, for the sheet AND the command
-// palette (palette.c), one table so they can't drift: performable ones (the
-// split focus keys) and keys the config doesn't hold as a plain trigger
-// (F11; the quick terminal's global Win+`).
+// palette (palette.c), one table so they can't drift: keys the config
+// doesn't hold as a plain trigger (F11; the quick terminal's global Win+`).
+// Performable keys (the split focus keys) come from the lookup, so a
+// rebound one shows as rebound.
 static const struct {
   const char* action;
   const WCHAR* key;
 } kDefaultKeys[] = {
-    {"goto_split:left", L"Ctrl+Alt+Left"},   {"goto_split:right", L"Ctrl+Alt+Right"},
-    {"goto_split:up", L"Ctrl+Alt+Up"},       {"goto_split:down", L"Ctrl+Alt+Down"},
-    {"goto_split:previous", L"Ctrl+Alt+["},  {"goto_split:next", L"Ctrl+Alt+]"},
-    {"toggle_fullscreen", L"F11"},           {"toggle_quick_terminal", L"Win+`"},
+    {"toggle_fullscreen", L"F11"},
+    {"toggle_quick_terminal", L"Win+`"},
 };
 
 // That table's key for an action, or NULL.
@@ -114,7 +114,7 @@ static HFONT g_sheet_font, g_sheet_bold;
 static bool entry_text(const SheetEntry* e, WCHAR* key, WCHAR* label, size_t cap) {
   key[0] = 0;
   if (e->action && g_config) {
-    ghostty_input_trigger_s t = ghostty_config_trigger(g_config, e->action, strlen(e->action));
+    ghostty_input_trigger_s t = ghostty_config_trigger_any(g_config, e->action, strlen(e->action));
     trigger_text(t, key, cap);
   }
   if (!key[0] && (e->key || default_key(e->action)))

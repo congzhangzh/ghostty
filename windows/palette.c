@@ -84,11 +84,13 @@ static void items_add_en(const WCHAR* title, const WCHAR* desc, const WCHAR* en_
   }
   it->pane = pane;
   if (action && g_config) {
-    ghostty_input_trigger_s t = ghostty_config_trigger(g_config, action, strlen(action));
+    // _any: performable bindings too (the split focus keys), so a rebound
+    // or unbound key shows as the config has it.
+    ghostty_input_trigger_s t = ghostty_config_trigger_any(g_config, action, strlen(action));
     trigger_text(t, it->key, 48);
   }
-  // A key the lookup can't give (the split focus keys: performable), from
-  // the cheat sheet's table (sheet.c), so the two show the same keys.
+  // A key the config doesn't hold as a plain trigger, from the cheat
+  // sheet's table (sheet.c), so the two show the same keys.
   if (!it->key[0] && default_key(action)) swprintf(it->key, 48, L"%ls", default_key(action));
 }
 

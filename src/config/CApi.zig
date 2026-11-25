@@ -121,6 +121,29 @@ fn config_trigger_(
     return trigger.cval();
 }
 
+/// As ghostty_config_trigger, performable bindings included: the key to
+/// show as a hint (a command palette, a cheat sheet), not to register as
+/// a menu shortcut. See Binding.Set.getTriggerAny.
+export fn ghostty_config_trigger_any(
+    self: *Config,
+    str: [*]const u8,
+    len: usize,
+) inputpkg.Binding.Trigger.C {
+    return config_trigger_any_(self, str[0..len]) catch |err| err: {
+        log.err("error finding trigger err={}", .{err});
+        break :err .{};
+    };
+}
+
+fn config_trigger_any_(
+    self: *Config,
+    str: []const u8,
+) !inputpkg.Binding.Trigger.C {
+    const action = try inputpkg.Binding.Action.parse(str);
+    const trigger: inputpkg.Binding.Trigger = self.keybind.set.getTriggerAny(action) orelse .{};
+    return trigger.cval();
+}
+
 export fn ghostty_config_diagnostics_count(self: *Config) u32 {
     return @intCast(self._diagnostics.items().len);
 }
@@ -276,5 +299,57 @@ test "ghostty_config_trigger: default keybind" {
         const trigger = try config_trigger_(&cfg, "adjust_selection:left");
         try testing.expectEqual(.physical, trigger.tag);
         try testing.expectEqual(.unidentified, trigger.key.physical);
+    }
+}
+
+test "ghostty_config_trigger_any: performable goto_split, rebound" {
+    const testing = std.testing;
+
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    const alloc = cfg._arena.?.allocator();
+
+    // The default goto_split keys are performable: the plain lookup has
+    // none, the hint lookup has the default.
+    if (comptime !builtin.target.os.tag.isDarwin()) {
+        const plain = try config_trigger_(&cfg, "goto_split:right");
+        try testing.expectEqual(.physical, plain.tag);
+        try testing.expectEqual(.unidentified, plain.key.physical);
+
+        const any = try config_trigger_any_(&cfg, "goto_split:right");
+        try testing.expectEqual(.physical, any.tag);
+        try testing.expectEqual(.arrow_right, any.key.physical);
+    }
+
+    // Rebound (performable, as the defaults): that key, for that
+    // direction only.
+    try cfg.keybind.parseCLI(alloc, "performable:ctrl+alt+l=goto_split:right");
+    {
+        const any = try config_trigger_any_(&cfg, "goto_split:right");
+        try testing.expectEqual(.unicode, any.tag);
+        try testing.expectEqual(@as(u32, 'l'), any.key.unicode);
+    }
+    if (comptime !builtin.target.os.tag.isDarwin()) {
+        const left = try config_trigger_any_(&cfg, "goto_split:left");
+        try testing.expectEqual(.physical, left.tag);
+        try testing.expectEqual(.arrow_left, left.key.physical);
+    }
+
+    // Unbound: no key left to show.
+    try cfg.keybind.parseCLI(alloc, "ctrl+alt+l=unbind");
+    try cfg.keybind.parseCLI(alloc, "ctrl+alt+arrow_right=unbind");
+    {
+        const any = try config_trigger_any_(&cfg, "goto_split:right");
+        try testing.expectEqual(.physical, any.tag);
+        try testing.expectEqual(.unidentified, any.key.physical);
+    }
+
+    // Rebound without performable: both lookups give it.
+    try cfg.keybind.parseCLI(alloc, "ctrl+alt+k=goto_split:right");
+    {
+        const plain = try config_trigger_(&cfg, "goto_split:right");
+        try testing.expectEqual(@as(u32, 'k'), plain.key.unicode);
+        const any = try config_trigger_any_(&cfg, "goto_split:right");
+        try testing.expectEqual(@as(u32, 'k'), any.key.unicode);
     }
 }
