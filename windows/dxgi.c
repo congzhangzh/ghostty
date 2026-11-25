@@ -12,8 +12,11 @@
 // a texture with D3D11 (WGL_NV_DX_interop2).
 //
 // GHOSTTY_PRESENT (opt-in; the default is readback, see present_mode_resolve):
-//   interop  the interop path when the extension is there; until its blit
-//            lands (step 3), frames go through the DXGI path below. Without
+//   interop  when the extension is there (step 3, OpenGL.zig dxPresent): GL
+//            blits each frame on the GPU into one of two D3D11 textures
+//            shared with the host, which copies it on the GPU into the back
+//            buffer (dxgi_present_shared) and presents. No CPU readback, but
+//            two GPU copies: not zero-copy in the strict sense. Without
 //            the extension (Wine, Mesa, CI runners, likely Windows on Arm):
 //            SwapBuffers ("swap"), said once.
 //   dxgi     the frames read back as today, uploaded into a FLIP_DISCARD
