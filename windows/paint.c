@@ -108,6 +108,93 @@ void take_frame(Window* w) {
   ghostty_frame_free(&f);
 }
 
+// ---- frames waiting for their swap chain (the DXGI path) -------------------------
+//
+// A DXGI pane's frame is not presented in the RENDER action. The core's tick
+// drains its mailbox in one loop while the renderer keeps adding frames, so
+// the vsync wait that was there (up to 100 ms a frame) kept a single tick
+// running for seconds. Nothing else ran on the UI thread meanwhile: the stats
+// tick (WM_TIMER) came every 7-30 s, and the watchdog's WM_NULL went
+// unanswered for 5 s, in every dxgi and interop run on a real GPU
+// (2026-11-25). Now RENDER marks the pane, and the main loop
+// (main.c) takes its newest frame and presents it once the swap chain has
+// room: its frame latency waitable is signaled, waited for together with the
+// messages (MsgWaitForMultipleObjectsEx), or 100 ms have passed (as before:
+// an occluded window may not signal). The UI thread never blocks on it.
+
+#define PENDING_MAX 63  // MsgWaitForMultipleObjectsEx: MAXIMUM_WAIT_OBJECTS - 1
+#define PENDING_MAX_MS 100
+
+static Window* g_pending[PENDING_MAX];
+static int g_npending;
+
+void frame_pending_add(Window* w) {
+  if (w->frame_pending) return;  // the core keeps only the newest frame
+  // Only a tick the main loop dispatched itself: in a modal loop (a window
+  // being moved or sized, a menu, a dialog) the main loop does not run, so
+  // the frame goes out at once, as before (a live resize keeps drawing).
+  if (g_npending == PENDING_MAX || g_loop_msg != WM_GHOSTTY_WAKEUP || g_tick_depth != 1) {
+    if (w->dxgi && w->dxgi_wait) WaitForSingleObjectEx(w->dxgi_wait, PENDING_MAX_MS, TRUE);  // room, as before
+    double hold = w->dxgi ? dxgi_test_hold_ms(w) : 0;
+    if (hold > 0) Sleep((DWORD)hold + 1);
+    take_frame(w);
+    if (!w->dxgi) InvalidateRect(w->hwnd, NULL, FALSE);  // DXGI failed on it: GDI paints it
+    return;
+  }
+  w->frame_pending = true;
+  w->pending_qpc = qpc();
+  g_pending[g_npending++] = w;
+}
+
+void frame_pending_drop(Window* w) {
+  for (int i = 0; i < g_npending; i++)
+    if (g_pending[i] == w) {
+      g_pending[i] = g_pending[--g_npending];
+      break;
+    }
+  w->frame_pending = false;
+}
+
+static void present_now(Window* w) {
+  frame_pending_drop(w);
+  w->tick_wait_ms += (double)(qpc() - w->pending_qpc) * g_qpc_ms;  // the time it waited for room
+  take_frame(w);
+  if (!w->dxgi) InvalidateRect(w->hwnd, NULL, FALSE);  // DXGI failed on it: GDI paints it
+}
+
+// The latency waitable of w was signaled in the main loop's wait (which took
+// its count): present w's newest frame.
+void frame_pending_signaled(Window* w) {
+  if (w->frame_pending) present_now(w);
+}
+
+// Present the panes with room (or which waited 100 ms); the handles of the
+// others go in hs (their panes in ws), for the main loop's wait, and
+// timeout_ms is lowered to when the first of them has waited 100 ms.
+int frames_pending_wait(HANDLE* hs, Window** ws, int max, DWORD* timeout_ms) {
+  int n = 0;
+  for (int i = 0; i < g_npending;) {
+    Window* w = g_pending[i];
+    double age = (double)(qpc() - w->pending_qpc) * g_qpc_ms;
+    double hold = w->dxgi ? dxgi_test_hold_ms(w) : 0;  // a test's vsync (dxgi.c), else 0
+    if (!w->dxgi || age >= PENDING_MAX_MS || n == max ||
+        (hold <= 0 && (!w->dxgi_wait || WaitForSingleObject(w->dxgi_wait, 0) == WAIT_OBJECT_0))) {
+      present_now(w);  // g_pending[i] is another one now
+      continue;
+    }
+    DWORD left = (DWORD)(PENDING_MAX_MS - age) + 1;
+    if (hold > 0) {
+      if ((DWORD)hold + 1 < left) left = (DWORD)hold + 1;
+    } else {
+      hs[n] = w->dxgi_wait;
+      ws[n++] = w;
+    }
+    if (left < *timeout_ms) *timeout_ms = left;
+    i++;
+  }
+  return n;
+}
+
 // ---- the progress bar on a pane (macOS's SurfaceProgressBar) -------------------
 //
 // OSC 9;4 progress, 2 points high along the pane's top, over the terminal:

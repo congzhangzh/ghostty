@@ -278,7 +278,23 @@ static void shared_free(void** t) {
 }
 
 // After the surface is freed (its render thread has stopped).
+// GHOSTTY_TEST_VSYNC_MS=<n> (tests only): a swap chain has room again only n
+// ms after its last present, as a vsync gives on real Windows (Wine's DXGI
+// does not wait for one, so a vsync wait on the UI thread cannot show there).
+// The ms still to go for w, or 0.
+double dxgi_test_hold_ms(Window* w) {
+  static int vsync = -1;
+  if (vsync < 0) {
+    const char* e = getenv("GHOSTTY_TEST_VSYNC_MS");
+    vsync = e ? atoi(e) : 0;
+  }
+  if (vsync <= 0 || !w->last_present_qpc) return 0;
+  double since = (double)(qpc() - w->last_present_qpc) * g_qpc_ms;
+  return since < vsync ? vsync - since : 0;
+}
+
 void dxgi_pane_gone(Window* w) {
+  frame_pending_drop(w);
   chain_free(w);
   shared_free(w->shared_tex);
   shared_free(w->shared_old);
@@ -324,8 +340,8 @@ static void shared_sync(Window* w, UINT width, UINT height) {
 bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height) {
   if (i > 1 || !w->shared_tex[i] || !device_ready() || !chain_ready(w, width, height)) return false;
   shared_free(w->shared_old);  // the renderer has moved to the new pair
-  uint64_t t0 = qpc();
-  if (w->dxgi_wait) WaitForSingleObjectEx(w->dxgi_wait, 100, TRUE);
+  // No wait for room here: the main loop presents only when the swap chain
+  // has it (paint.c frames_pending_wait).
   uint64_t t1 = qpc();
   ID3D11Texture2D* back = NULL;
   if (IDXGISwapChain1_GetBuffer((IDXGISwapChain1*)w->dxgi_chain, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK)
@@ -336,7 +352,7 @@ bool dxgi_present_shared(Window* w, unsigned i, UINT width, UINT height) {
   ID3D11Texture2D_Release(back);
   HRESULT hr = IDXGISwapChain1_Present((IDXGISwapChain1*)w->dxgi_chain, 1, 0);
   uint64_t t2 = qpc();
-  w->tick_wait_ms += (double)(t1 - t0) * g_qpc_ms;
+  w->last_present_qpc = t2;
   w->tick_present_ms += (double)(t2 - t1) * g_qpc_ms;
   w->interop_frames++;
   return SUCCEEDED(hr);
@@ -481,9 +497,7 @@ void dxgi_repaint(Window* w) {
 // the pane goes back to GDI (said once).
 bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT stride) {
   if (!device_ready() || !chain_ready(w, width, height)) goto fail;
-  uint64_t t0 = qpc();
-  if (w->dxgi_wait) WaitForSingleObjectEx(w->dxgi_wait, 100, TRUE);  // the queue has room
-  uint64_t t1 = qpc();
+  uint64_t t1 = qpc();  // room in the queue: the main loop waited for it (paint.c)
   IDXGISwapChain1* sc = w->dxgi_chain;
   ID3D11Texture2D* back = NULL;
   if (IDXGISwapChain1_GetBuffer(sc, 0, &IID_ID3D11Texture2D, (void**)&back) != S_OK) goto fail;
@@ -493,9 +507,9 @@ bool dxgi_present(Window* w, const uint8_t* bgra, UINT width, UINT height, UINT 
   ID3D11Texture2D_Release(back);
   HRESULT hr = IDXGISwapChain1_Present(sc, 1, 0);
   uint64_t t2 = qpc();
+  w->last_present_qpc = t2;
   if (FAILED(hr)) goto fail;
   shared_sync(w, width, height);  // interop: textures for the renderer, this size
-  w->tick_wait_ms += (double)(t1 - t0) * g_qpc_ms;
   w->tick_present_ms += (double)(t2 - t1) * g_qpc_ms;
   return true;
 fail:

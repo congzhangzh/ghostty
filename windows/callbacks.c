@@ -182,6 +182,10 @@ bool action_cb(ghostty_app_t app, ghostty_target_s target,
   switch (action.tag) {
     case GHOSTTY_ACTION_RENDER:
       if (!w) return false;
+      if (w->dxgi) {
+        frame_pending_add(w);  // presented by the main loop when the swap chain has room (paint.c)
+        return true;
+      }
       take_frame(w);
       InvalidateRect(w->hwnd, NULL, FALSE);
       return true;

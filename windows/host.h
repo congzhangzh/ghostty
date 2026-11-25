@@ -165,6 +165,11 @@ struct Window {
   bool shown;
   int dropped;
   bool repaint_once;  // present the last frame again once (an overlay went: dxgi.c)
+  // A DXGI pane's frame waiting for room in its swap chain (paint.c: the
+  // main loop presents it), and since when.
+  bool frame_pending;
+  uint64_t pending_qpc;
+  uint64_t last_present_qpc;  // the DXGI path's last Present (dxgi.c: GHOSTTY_TEST_VSYNC_MS)
   int notes;                  // desktop notifications received (OSC 9/777)
   char *note_title, *note_body;  // the last one's, as received (UTF-8): for the test pipe
   bool attention;  // the bell rang, or a notification came while not looked at (tabs.c)
@@ -240,6 +245,8 @@ extern ghostty_config_t g_config;
 extern HINSTANCE g_inst;
 extern HWND g_wakeup_hwnd;  // message-only window for wakeups
 extern volatile LONG g_wakeup_posted;  // a WM_GHOSTTY_WAKEUP is queued
+extern UINT g_loop_msg;                // the message the main loop is dispatching (main.c)
+extern int g_tick_depth;               // ghostty_app_tick calls running (main.c)
 extern Frame* g_frames;  // open windows
 extern bool g_debug_keys;  // GHOSTTY_DEBUG_KEYS is set: trace key messages
 extern DWORD g_main_tid;  // the thread that runs the message loop
@@ -269,6 +276,11 @@ void mouse_pos(Window* w, LPARAM lp);
 void mouse_button(Window* w, ghostty_input_mouse_state_e state,
                          ghostty_input_mouse_button_e button);
 void take_frame(Window* w);
+void frame_pending_add(Window* w);
+void frame_pending_drop(Window* w);
+int frames_pending_wait(HANDLE* hs, Window** ws, int max, DWORD* timeout_ms);
+void frame_pending_signaled(Window* w);
+double dxgi_test_hold_ms(Window* w);
 void paint(Window* w);
 ghostty_clipboard_read_result_e read_clipboard_cb(
     void* ud, ghostty_clipboard_e which, void* state,
