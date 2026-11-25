@@ -11,7 +11,7 @@
 // through a DXGI flip-model swap chain, and finding out whether GL can share
 // a texture with D3D11 (WGL_NV_DX_interop2).
 //
-// GHOSTTY_PRESENT (opt-in; the default is readback, see present_mode_resolve):
+// GHOSTTY_PRESENT (unset: dxgi, or interop when GL offers it; see present_mode_resolve):
 //   interop  when the extension is there (step 3, OpenGL.zig dxPresent): GL
 //            blits each frame on the GPU into one of two D3D11 textures
 //            shared with the host, which copies it on the GPU into the back
@@ -114,8 +114,8 @@ static void probe_gl(void) {
   if (h) DestroyWindow(h);
 }
 
-// GHOSTTY_PRESENT=interop: kept (and served by the DXGI path until the
-// blit lands) when the extension is there, else swap. At start, before any
+// GHOSTTY_PRESENT=interop: kept when the extension is there (frames go
+// into shared D3D11 textures, step 3), else swap. At start, before any
 // surface (the core reads GHOSTTY_PRESENT on its render thread).
 // GHOSTTY_INTEROP_FORCE=1: the textures are made and handed over even
 // without the extension (tests: the core then reads frames back, and says
@@ -128,17 +128,23 @@ static bool interop_forced(void) {
 void present_mode_resolve(void) {
   const char* v = getenv("GHOSTTY_PRESENT");
   if (!v || !*v) {
-    // The default is readback again (the owner, 2026-11-24: "Readback default
-    // (Recommended)"; it was DXGI, with interop when GL offers it, from
-    // 2026-11-23). Measured on his RTX 5070 laptop with .7 (measure.v3, full
-    // screen, a steady load): readback 108.7 fps, dxgi 58.6, interop 2.0 with
-    // the UI timer starved; and a Ghostty that did not end on close in 1 of 4
-    // dxgi runs and 2 of 4 interop runs, 0 of 4 readback. dxgi and interop
-    // stay opt-in (GHOSTTY_PRESENT=dxgi|interop) until the stall and the hang
-    // are found. Unset means readback everywhere (the host's DXGI path and
-    // the core's both ask for dxgi or interop), so no GL probe at start.
-    fprintf(stderr, "ghostty: present: default readback (GHOSTTY_PRESENT=dxgi or interop to opt in)\n");
-    return;
+    // The default (since 2026-11-23, again since 2026-11-25): the DXGI flip
+    // path, with interop when GL offers it; any failure falls back to GDI
+    // (said once). GHOSTTY_PRESENT=readback is the way back to GDI.
+    // Readback was the default from 2026-11-24 to 2026-11-25 after a .7
+    // measurement on a real GPU (2026-11-24) that read "interop 2.0 fps".
+    // That figure was WRONG: only the start-up stats line (still on
+    // dxgi) came in, because the UI thread's vsync wait starved the stats
+    // timer. Measured again with .9 (2026-11-25, full screen, a steady load):
+    // interop 48-59 fps (vsync wait 16.7 ms, present 0.08 ms), dxgi 33-60,
+    // readback 108.7 (.7; GDI does not wait for vsync). A Ghostty that did
+    // not end on close: 1 of 3 interop and 1 of 3 dxgi runs.
+    uint64_t t0 = qpc();
+    probe_gl();
+    _putenv(g_gl.interop ? "GHOSTTY_PRESENT=interop" : "GHOSTTY_PRESENT=dxgi");
+    fprintf(stderr, "ghostty: present: default %s (probe %.1f ms%s%s)\n", g_gl.interop ? "interop" : "dxgi",
+            (double)(qpc() - t0) * g_qpc_ms, g_gl.why ? ": " : "", g_gl.why ? g_gl.why : "");
+    v = getenv("GHOSTTY_PRESENT");
   }
   if (strcmp(v, "interop") != 0) return;
   probe_gl();
@@ -146,8 +152,8 @@ void present_mode_resolve(void) {
     fprintf(stderr, "ghostty: present: interop forced (GHOSTTY_INTEROP_FORCE=1)%s\n",
             g_gl.interop ? "" : ", though the probe found no WGL_NV_DX_interop2");
   } else if (g_gl.interop) {
-    fprintf(stderr, "ghostty: present: interop available (%s, %s%s); frames through DXGI (the GL blit "
-                    "is not in yet)\n",
+    fprintf(stderr, "ghostty: present: interop available (%s, %s%s); frames go into shared D3D11 "
+                    "textures\n",
             g_gl.vendor, g_gl.renderer, g_gl.have_luid ? ", LUID known" : "");
   } else {
     fprintf(stderr, "ghostty: present: interop unavailable: %s; using swap\n", g_gl.why);
