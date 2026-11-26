@@ -20,7 +20,6 @@ const kernel_info = @import("kernel_info.zig");
 // Namespaces
 pub const cgroup = @import("cgroup.zig");
 pub const conpty = @import("conpty.zig");
-pub const default_shell = @import("default_shell.zig");
 pub const edit = @import("edit.zig");
 pub const hostname = @import("hostname.zig");
 pub const i18n = @import("i18n.zig");
@@ -61,7 +60,6 @@ pub const getKernelInfo = kernel_info.getKernelInfo;
 pub const getConfigEditCommand = edit.getConfigEditCommand;
 
 test {
-    _ = default_shell;
     _ = file;
     _ = stderr;
     _ = edit;
