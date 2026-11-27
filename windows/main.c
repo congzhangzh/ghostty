@@ -274,6 +274,52 @@ static LRESULT CALLBACK wakeup_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// The test hooks (GHOSTTY_TEST_HANG / _CRASH / _STDERR, see main): set once in
+// main, run once by the loop, 3 seconds after start.
+static const char* s_test_hang;
+static const char* s_test_crash;
+static const char* s_test_stderr;
+
+// One message from the loop; false for WM_QUIT.
+static bool loop_dispatch(MSG* msg) {
+  if (msg->message == WM_QUIT) return false;
+  if (msg->message == WM_TIMER && msg->hwnd == NULL &&
+      (s_test_hang || s_test_crash || s_test_stderr)) {
+    KillTimer(NULL, msg->wParam);
+    if (s_test_stderr) {
+      char line[128];
+      int kb = atoi(s_test_stderr);
+      for (int i = 0; i < kb * 1024 / 64; i++) {
+        int n = snprintf(line, sizeof(line),
+                         "ghostty: stderr test %s %07d%*s\n",
+                         i % 2 ? "crt " : "std ", i, 30, "");
+        if (i % 2) {
+          fwrite(line, 1, (size_t)n, stderr);
+        } else {
+          DWORD w;
+          WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, (DWORD)n, &w, NULL);
+        }
+      }
+      fprintf(stderr, "ghostty: stderr test done\n");
+    }
+    if (s_test_hang) Sleep((DWORD)atoi(s_test_hang) * 1000);
+    if (s_test_crash && strcmp(s_test_crash, "av") == 0) *(volatile int*)8 = 1;
+    if (s_test_crash && strcmp(s_test_crash, "abort") == 0) abort();
+    if (s_test_crash && strcmp(s_test_crash, "panic") == 0) {
+      static const char m[] = "GHOSTTY_TEST_CRASH=panic";
+      ULONG_PTR args[2] = {(ULONG_PTR)m, sizeof(m) - 1};
+      RaiseException(GHOSTTY_PANIC_CODE, EXCEPTION_NONCONTINUABLE, 2, args);
+    }
+    s_test_hang = s_test_crash = s_test_stderr = NULL;
+    return true;
+  }
+  TranslateMessage(msg);
+  g_loop_msg = msg->message;
+  DispatchMessageW(msg);
+  g_loop_msg = 0;
+  return true;
+}
+
 int main(int argc, char** argv) {
   int rc = 0;
   if (report_mode(&rc)) return rc;
@@ -369,15 +415,24 @@ int main(int argc, char** argv) {
   // abort()). GHOSTTY_TEST_STDERR=<KB> writes that much log on stderr from
   // the main thread, half through the CRT and half through the handle (as
   // Zig's std.log does), to prove a stderr nobody reads never blocks it.
-  const char* test_hang = getenv("GHOSTTY_TEST_HANG");
-  const char* test_crash = getenv("GHOSTTY_TEST_CRASH");
-  const char* test_stderr = getenv("GHOSTTY_TEST_STDERR");
-  if (test_hang || test_crash || test_stderr) SetTimer(NULL, 0, 3000, NULL);
+  s_test_hang = getenv("GHOSTTY_TEST_HANG");
+  s_test_crash = getenv("GHOSTTY_TEST_CRASH");
+  s_test_stderr = getenv("GHOSTTY_TEST_STDERR");
+  if (s_test_hang || s_test_crash || s_test_stderr) SetTimer(NULL, 0, 3000, NULL);
 
   // The loop waits for messages and, with them, for room in the swap chains
   // of DXGI panes with a frame waiting (paint.c frames_pending_wait): the UI
-  // thread never blocks on vsync. At most 64 messages a round, so a flood
-  // never keeps a frame waiting.
+  // thread never blocks on vsync.
+  //
+  // Each round takes input, paint and sent messages first, then timers, then
+  // the rest (posted: the core's wakeups, the test pipe's requests) up to and
+  // including ONE wakeup. Windows hands out posted messages before input,
+  // paint and timers, and under heavy output the core posts its wakeup again
+  // during every tick (wakeup_proc), so one was always waiting: a plain
+  // PeekMessage loop never reached the keyboard and mouse, and after 5 s
+  // without input Windows showed the window as a ghost ("Not Responding")
+  // while it kept drawing. Now there is at most one tick between two looks at
+  // input. Each part has a budget, so no kind of message can hold a round.
   MSG msg;
   bool quit = false;
   while (!quit) {
@@ -387,45 +442,16 @@ int main(int argc, char** argv) {
     int nh = frames_pending_wait(hs, ws, MAXIMUM_WAIT_OBJECTS - 1, &timeout);
     DWORD r = MsgWaitForMultipleObjectsEx((DWORD)nh, nh ? hs : NULL, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     if (r < WAIT_OBJECT_0 + (DWORD)nh) frame_pending_signaled(ws[r - WAIT_OBJECT_0]);
-    for (int budget = 64; budget > 0 && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE); budget--) {
-      if (msg.message == WM_QUIT) {
-        quit = true;
-        break;
-      }
-      if (msg.message == WM_TIMER && msg.hwnd == NULL &&
-          (test_hang || test_crash || test_stderr)) {
-        KillTimer(NULL, msg.wParam);
-        if (test_stderr) {
-          char line[128];
-          int kb = atoi(test_stderr);
-          for (int i = 0; i < kb * 1024 / 64; i++) {
-            int n = snprintf(line, sizeof(line),
-                             "ghostty: stderr test %s %07d%*s\n",
-                             i % 2 ? "crt " : "std ", i, 30, "");
-            if (i % 2) {
-              fwrite(line, 1, (size_t)n, stderr);
-            } else {
-              DWORD w;
-              WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, (DWORD)n, &w, NULL);
-            }
-          }
-          fprintf(stderr, "ghostty: stderr test done\n");
-        }
-        if (test_hang) Sleep((DWORD)atoi(test_hang) * 1000);
-        if (test_crash && strcmp(test_crash, "av") == 0) *(volatile int*)8 = 1;
-        if (test_crash && strcmp(test_crash, "abort") == 0) abort();
-        if (test_crash && strcmp(test_crash, "panic") == 0) {
-          static const char m[] = "GHOSTTY_TEST_CRASH=panic";
-          ULONG_PTR args[2] = {(ULONG_PTR)m, sizeof(m) - 1};
-          RaiseException(GHOSTTY_PANIC_CODE, EXCEPTION_NONCONTINUABLE, 2, args);
-        }
-        test_hang = test_crash = test_stderr = NULL;
-        continue;
-      }
-      TranslateMessage(&msg);
-      g_loop_msg = msg.message;
-      DispatchMessageW(&msg);
-      g_loop_msg = 0;
+    for (int budget = 64; !quit && budget > 0 &&
+                          PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE | PM_QS_INPUT | PM_QS_PAINT | PM_QS_SENDMESSAGE);
+         budget--)
+      quit = !loop_dispatch(&msg);
+    for (int budget = 16; !quit && budget > 0 && PeekMessageW(&msg, NULL, WM_TIMER, WM_TIMER, PM_REMOVE); budget--)
+      quit = !loop_dispatch(&msg);
+    for (int budget = 64; !quit && budget > 0 && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE); budget--) {
+      bool wakeup = msg.message == WM_GHOSTTY_WAKEUP;
+      quit = !loop_dispatch(&msg);
+      if (wakeup) break;  // the next tick waits for the next look at input
     }
   }
   InterlockedExchange(&g_loop_done, 1);
